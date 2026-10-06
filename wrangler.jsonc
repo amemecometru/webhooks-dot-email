@@ -1,0 +1,58 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "senders",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-27",
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  "workers_dev": true,
+  "preview_urls": true,
+
+  "routes": [
+    { "pattern": "webhooks.email/*", "custom_domain": true },
+    { "pattern": "mcp.webhooks.email/*", "custom_domain": true },
+    { "pattern": "api.webhooks.email/*", "custom_domain": true }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "webhooks-email-db",
+      "database_id": "03cddfda-aac2-4c7e-bfdf-d0b78a98ab30"
+    }
+  ],
+
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
+
+  "ai": {
+    "binding": "AI"
+  },
+
+  "triggers": {
+    "crons": [
+      "* * * * *",
+      "0 0 * * 1"
+    ]
+  },
+
+  "vars": {
+    "ENVIRONMENT": "production",
+    "API_HOST": "api.webhooks.email",
+    "MCP_HOST": "mcp.webhooks.email",
+    "OUTBOUND_EMAIL": "noreply@webhooks.email",
+    "WEBHOOK_TIMEOUT_MS": "10000",
+    "MAX_RETRIES": "5",
+    "AUTH_CACHE_TTL_SECONDS": "3600",
+    "KEY_PBKDF2_ITERATIONS": "100000",
+    "DELIVERY_BATCH_SIZE": "25",
+    "CHARGE_ENDPOINT": "email.send",
+    "CHARGE_WEBHOOK_ENDPOINT": "webhook.send",
+    "CHARGE_INBOUND_ENDPOINT": "email.inbound"
+  }
+}
