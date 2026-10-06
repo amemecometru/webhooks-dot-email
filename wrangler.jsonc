@@ -22,7 +22,7 @@
     {
       "binding": "DB",
       "database_name": "webhooks-email-db",
-      "database_id": "03cddfda-aac2-4c7e-bfdf-d0b78a98ab30"
+      "database_id": "<add-db-id-here>"
     }
   ],
 
