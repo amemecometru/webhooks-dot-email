@@ -18,8 +18,8 @@ export function isoIn(seconds: number): string {
 }
 
 /**
- * Monday-anchored UTC week boundary. The weekly billing cron runs Sunday 00:00
- * UTC, so the billable window is the 7 days ending at that instant.
+ * Rolling 7-day window ending at `now` (the scheduled billing time). The cron
+ * fires Monday 00:00 UTC, so the window is exactly the prior calendar week.
  */
 export function weekWindow(now = new Date()): { start: Date; end: Date } {
   const end = new Date(now);

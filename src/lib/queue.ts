@@ -278,27 +278,47 @@ export async function notifyEmailStatus(
   }
 }
 
+export interface InboundRoute {
+  agent_id: string;
+  callback_webhook: string;
+}
+
+/** Resolve the route owner for an inbound sender (exact match wins over '*'). */
+export async function resolveInboundRoute(
+  db: D1Database,
+  from: string
+): Promise<InboundRoute | null> {
+  return db
+    .prepare(
+      `SELECT agent_id, callback_webhook FROM inbound_routes
+        WHERE from_email = ? OR from_email = '*'
+        ORDER BY (from_email = '*') ASC
+        LIMIT 1`
+    )
+    .bind(from)
+    .first<InboundRoute>()
+    .catch(() => null);
+}
+
 /** Fan an inbound email out to the registered callback for that sender. */
 export async function fanOutInbound(
   env: Env,
-  args: { from: string; inboundId: string; subject: string; body: string; to: string }
-): Promise<string | null> {
-  const route = await env.DB.prepare(
-    `SELECT callback_webhook FROM inbound_routes
-      WHERE from_email = ? OR from_email = '*'
-      ORDER BY (from_email = '*') ASC
-      LIMIT 1`
-  )
-    .bind(args.from)
-    .first<{ callback_webhook: string }>()
-    .catch(() => null);
-
+  args: {
+    from: string;
+    inboundId: string;
+    subject: string;
+    body: string;
+    to: string;
+    route: InboundRoute | null;
+  }
+): Promise<{ eventId: string; agentId: string } | null> {
+  const { route } = args;
   if (!route?.callback_webhook) return null;
 
   const eventId = `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
   await enqueueWebhook(env.DB, {
     eventId,
-    agentId: 'system',
+    agentId: route.agent_id,
     toWebhookUrl: route.callback_webhook,
     eventType: 'email.inbound',
     payload: {
@@ -310,7 +330,7 @@ export async function fanOutInbound(
       text: args.body,
     },
   });
-  return eventId;
+  return { eventId, agentId: route.agent_id };
 }
 
 export { getEmail };

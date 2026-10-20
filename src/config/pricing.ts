@@ -6,6 +6,9 @@
  *   email.send   $0.01
  *   webhook.send $0.001
  *   email.inbound $0.0005
+ *
+ * Inbound: one charge per routed message, to the route owner. The fan-out
+ * webhook is not separately charged.
  */
 
 export type ChargeEndpoint = 'email.send' | 'webhook.send' | 'email.inbound';
