@@ -17,6 +17,7 @@ import {
 } from './api/meta';
 import { drainEmails, drainWebhooks, requeueStuckSends } from './lib/queue';
 import { weeklyBilling } from './lib/billing';
+import { WEEKLY_BILLING_CRON } from './config/schedules';
 
 const app = new Hono<{ Bindings: Env; Variables: AppVars }>();
 
@@ -131,7 +132,7 @@ export default {
   /**
    * Cron schedules (see wrangler.jsonc triggers):
    *   "* * * * *"   -> drain the D1 delivery queue, every minute
-   *   "0 0 0 * * 0" -> weekly Stripe billing, Sunday 00:00 UTC
+   *   "0 0 * * 1"   -> weekly Stripe billing, Monday 00:00 UTC
    */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     const task = (async () => {
@@ -169,5 +170,4 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-export const WEEKLY_BILLING_CRON = '0 0 0 * * 0';
 export { app };

@@ -44,5 +44,9 @@ export function logChargeAsync(env: Env, agentId: string, endpoint: ChargeEndpoi
   );
 }
 
-/** Charge we absorb on the agent's behalf (e.g. inbound email we route). */
+/**
+ * Sentinel owner for things we do not bill to a customer. Inbound email is
+ * charged to the route owner; 'system' only holds unrouted mail (stored for
+ * audit, never charged and never fanned out).
+ */
 export const SYSTEM_AGENT_ID = 'system';

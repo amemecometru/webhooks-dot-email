@@ -31,10 +31,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
   last_used_at      TEXT
 );
 
--- Inbound email and the webhook we fan it out to are metered/attributed to
--- agent_id 'system', and charges/webhooks both carry a FOREIGN KEY onto
--- api_keys(agent_id). This sentinel row is what makes those inserts legal.
--- status is 'system' (not 'active') so it never counts as a real agent.
+-- Inbound email and the webhook we fan it out to are attributed to the route
+-- owner in agent_id; unrouted mail stays under 'system' (stored for audit, not
+-- charged, not fanned out). charges/webhooks both carry a FOREIGN KEY onto
+-- api_keys(agent_id). This sentinel row is what makes system-owned inserts
+-- legal. status is 'system' (not 'active') so it never counts as a real agent.
 INSERT OR IGNORE INTO api_keys
   (key_id, agent_id, agent_name, key_hash, key_lookup, stripe_customer_id, status, created_at)
 VALUES ('key_system', 'system', 'system', 'pbkdf2$1$AA$AA', 'system-lookup', 'cus_system', 'system', '1970-01-01T00:00:00.000Z');
@@ -91,7 +92,7 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   to_email            TEXT NOT NULL,
   subject             TEXT NOT NULL,
   body                TEXT NOT NULL,
-  agent_id            TEXT NOT NULL DEFAULT 'system',
+  agent_id            TEXT NOT NULL DEFAULT 'system', -- route owner, or 'system' if unrouted
   forwarded_event_id  TEXT,               -- webhooks.event_id if we fanned it out
   forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
   received_at         TEXT NOT NULL
@@ -114,7 +115,7 @@ CREATE TABLE IF NOT EXISTS inbound_routes (
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS charges (
   charge_id            TEXT PRIMARY KEY,
-  agent_id             TEXT NOT NULL,      -- 'system' for inbound we absorb
+  agent_id             TEXT NOT NULL,      -- payer; 'system' only for unrouted inbound audit
   endpoint             TEXT NOT NULL,      -- email.send | webhook.send | email.inbound
   amount_usd           REAL NOT NULL,
   status               TEXT NOT NULL DEFAULT 'pending', -- pending|billed|failed

@@ -4,8 +4,9 @@ import { nowIso, weekWindow } from '../db/queries';
 import { isStripeConfigured, reportMeterEvent, StripeError } from './stripe-metering';
 
 /**
- * Weekly billing: aggregate pending D1 charges per agent and report them to
- * Stripe as billing meter event summaries, then mark the charges billed.
+ * Weekly billing (Monday 00:00 UTC): aggregate pending D1 charges per agent and
+ * report them to Stripe as billing meter event summaries, then mark the charges
+ * billed.
  *
  * Failure policy is the important part. Charges are only marked 'billed' after
  * Stripe confirms the meter event summary. If Stripe is unconfigured, a meter

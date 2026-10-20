@@ -1,7 +1,7 @@
 import parseMime from 'postal-mime';
 import type { Env, Ctx } from '../types';
 import { PRICING } from '../config/pricing';
-import { fanOutInbound } from '../lib/queue';
+import { fanOutInbound, resolveInboundRoute } from '../lib/queue';
 import { logChargeAsync, SYSTEM_AGENT_ID } from '../lib/charge-logger';
 import { nowIso } from '../db/queries';
 import { inboundEmailSchema } from '../types';
@@ -34,26 +34,34 @@ export type InboundResult = {
 export async function storeInbound(env: Env, rec: InboundRecord): Promise<InboundResult> {
   const inboundId = `inb_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
 
+  // Resolve once: the route owner pays for inbound and owns the fan-out
+  // webhook. Unrouted mail is stored for audit under 'system' but not charged.
+  const route = await resolveInboundRoute(env.DB, rec.from);
+  const ownerId = route?.agent_id ?? SYSTEM_AGENT_ID;
+
   await env.DB.prepare(
     `INSERT INTO inbound_emails
        (inbound_id, from_email, to_email, subject, body, agent_id, received_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(inboundId, rec.from, rec.to, rec.subject, rec.body, SYSTEM_AGENT_ID, nowIso())
+    .bind(inboundId, rec.from, rec.to, rec.subject, rec.body, ownerId, nowIso())
     .run();
 
-  // We absorb inbound cost; it is metered against 'system'.
-  logChargeAsync(env, SYSTEM_AGENT_ID, 'email.inbound', inboundId);
+  if (route) {
+    logChargeAsync(env, route.agent_id, 'email.inbound', inboundId);
+  }
 
   let eventId: string | null = null;
   try {
-    eventId = await fanOutInbound(env, {
+    const fanned = await fanOutInbound(env, {
       from: rec.from,
       inboundId,
       subject: rec.subject,
       body: rec.body,
       to: rec.to,
+      route,
     });
+    eventId = fanned?.eventId ?? null;
   } catch (err) {
     console.error('inbound fan-out failed:', (err as Error).message);
   }

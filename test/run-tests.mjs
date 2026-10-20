@@ -24,6 +24,9 @@ const app = workerModule.app;
 const { hashApiKey, generateApiKey, hmacSha256Hex, keyLookupDigest } = await import(
   pathToFileURL(new URL('../src/lib/crypto.ts', import.meta.url).pathname).href
 );
+const { WEEKLY_BILLING_CRON, DRAIN_CRON } = await import(
+  pathToFileURL(new URL('../src/config/schedules.ts', import.meta.url).pathname).href
+);
 
 
 /* -------------------------------------------------------------------------- */
@@ -349,6 +352,57 @@ await test('rejects an oversized body', async () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*  Cron: schedule alignment                                                   */
+/* -------------------------------------------------------------------------- */
+
+suite('cron: schedule alignment');
+
+await test('wrangler.jsonc crons are all handled by scheduled()', async () => {
+  const raw = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8');
+  const wrangler = JSON.parse(
+    raw.replace(/^\s*\/\/.*$/gm, '').replace(/,(\s*[}\]])/g, '$1')
+  );
+  const crons = wrangler.triggers.crons;
+  assert(Array.isArray(crons), 'triggers.crons missing');
+
+  assert(
+    crons.includes(WEEKLY_BILLING_CRON),
+    `WEEKLY_BILLING_CRON (${WEEKLY_BILLING_CRON}) not in wrangler crons: ${crons}`
+  );
+  // scheduled() has exactly two branches: weekly billing and the drain. Every
+  // configured cron must map to one of them, or a tick would be handled blindly.
+  for (const cron of crons) {
+    assert(
+      cron === WEEKLY_BILLING_CRON || cron === DRAIN_CRON,
+      `cron ${cron} is not handled by scheduled()`
+    );
+  }
+});
+
+await test('billing cron runs billing, not the drain', async () => {
+  const id = 'msg_' + 'c'.repeat(24);
+  await DB.prepare(
+    `INSERT INTO emails (message_id, agent_id, to_email, from_email, subject, body, status, next_attempt_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`
+  ).bind(id, AGENT_ID, 'sched@path.test', 'noreply@webhooks.email', 'Sched', 'body', new Date().toISOString(), new Date().toISOString()).run();
+
+  sentEmails.length = 0;
+  const runsBefore = Number(DB.prepare(`SELECT COUNT(*) c FROM billing_runs`).get().c);
+  await runCron(WEEKLY_BILLING_CRON);
+  eq(sentEmails.length, 0, 'billing cron must not drain the email queue');
+  eq(DB.prepare(`SELECT status FROM emails WHERE message_id = ?`).get(id).status, 'queued');
+  assert(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM billing_runs`).get().c) === runsBefore + 1,
+    'billing cron should have recorded a billing run'
+  );
+
+  await runCron(DRAIN_CRON);
+  eq(sentEmails.length, 1, 'drain cron should have sent the queued email');
+  eq(DB.prepare(`SELECT status FROM emails WHERE message_id = ?`).get(id).status, 'sent');
+  sentEmails.length = 0;
+});
+
+/* -------------------------------------------------------------------------- */
 /*  POST /webhooks/send                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -606,27 +660,27 @@ await test('GET /email/status/:messageId returns a receipt', async () => {
 
 suite('inbound');
 
-await test('POST /email/inbound stores and meters at $0.0005', async () => {
+await test('POST /email/inbound stores unrouted mail without charging', async () => {
   const r = await req('POST', '/email/inbound', {
     body: { from: 'Lead@Corp.test', to: 'noreply@webhooks.email', subject: 'Interested', text: 'Tell me more' },
   });
   assert(r.status === 200, `status ${r.status}`);
-  eq(r.json.charge.amount_usd, 0.0005);
 
-  const row = DB.prepare(`SELECT from_email, forwarded_to_webhook FROM inbound_emails WHERE inbound_id = ?`).get(r.json.inbound_id);
+  const row = DB.prepare(`SELECT from_email, agent_id, forwarded_to_webhook FROM inbound_emails WHERE inbound_id = ?`).get(r.json.inbound_id);
   eq(row.from_email, 'lead@corp.test', 'sender should be lowercased');
+  eq(row.agent_id, 'system', 'unrouted mail is stored under system');
   eq(Number(row.forwarded_to_webhook), 0, 'no route registered yet');
 
-  const chg = DB.prepare(`SELECT amount_usd FROM charges WHERE ref_id = ?`).get(r.json.inbound_id);
-  eq(Number(chg.amount_usd), 0.0005);
+  const chg = DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(r.json.inbound_id);
+  eq(Number(chg.c), 0, 'unrouted inbound must not be charged');
 });
 
-await test('inbound is charged to the system agent, not the caller', async () => {
-  const row = DB.prepare(`SELECT agent_id FROM charges WHERE endpoint = ?`).get('email.inbound');
-  eq(row.agent_id, 'system');
+await test('an unrouted sender is stored under system and never charged', async () => {
+  const chg = DB.prepare(`SELECT COUNT(*) c FROM charges WHERE endpoint = ? AND agent_id = 'system'`).get('email.inbound');
+  eq(Number(chg.c), 0, 'system must never accumulate inbound charges');
 });
 
-await test('a registered sender gets fanned out to their callback', async () => {
+await test('a registered sender is fanned out and billed to the route owner', async () => {
   const rr = await req('POST', '/api/inbound/routes', {
     headers: AUTH,
     body: { from: 'vip@corp.test', callback_webhook: 'https://agent.test/inbound' },
@@ -649,28 +703,42 @@ await test('a registered sender gets fanned out to their callback', async () => 
   });
   const inboundId = r.json.inbound_id;
   eq(r.json.status, 'stored');
+  assert(r.json.forwarded_event_id, 'should return the created event_id');
 
-  const row = DB.prepare(`SELECT forwarded_to_webhook, forwarded_event_id FROM inbound_emails WHERE inbound_id = ?`).get(inboundId);
+  const row = DB.prepare(`SELECT agent_id, forwarded_to_webhook, forwarded_event_id FROM inbound_emails WHERE inbound_id = ?`).get(inboundId);
+  eq(row.agent_id, AGENT_ID, 'inbound row is attributed to the route owner');
   eq(Number(row.forwarded_to_webhook), 1, 'should have been fanned out');
   assert(row.forwarded_event_id, 'should record the created event_id');
 
+  // Exactly one email.inbound charge, to the owner.
+  const chgRows = DB.prepare(`SELECT agent_id, amount_usd FROM charges WHERE ref_id = ?`).allSync(inboundId);
+  eq(chgRows.length, 1, 'exactly one charge for the inbound message');
+  eq(chgRows[0].agent_id, AGENT_ID);
+  eq(Number(chgRows[0].amount_usd), 0.0005);
+
+  // The fan-out webhook is owned by the route owner and is NOT separately charged.
+  const wrow = DB.prepare(`SELECT agent_id, status FROM webhooks WHERE event_id = ?`).get(row.forwarded_event_id);
+  eq(wrow.agent_id, AGENT_ID, 'fan-out webhook belongs to the route owner');
+  const sendCharge = DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ? AND endpoint = 'webhook.send'`).get(row.forwarded_event_id);
+  eq(Number(sendCharge.c), 0, 'fan-out must not add a webhook.send charge');
+
   // The fan-out is itself a queued webhook; drain it and confirm delivery.
-  await runCron('* * * * *');
+  await runCron(DRAIN_CRON);
   assert(fanned, 'callback never fired');
   eq(fanned.from, 'vip@corp.test');
   eq(fanned.subject, 'Big deal');
   eq(fanned.inbound_id, inboundId);
-
-  const wrow = DB.prepare(`SELECT status FROM webhooks WHERE event_id = ?`).get(row.forwarded_event_id);
-  eq(wrow.status, 'delivered');
+  eq(DB.prepare(`SELECT status FROM webhooks WHERE event_id = ?`).get(row.forwarded_event_id).status, 'delivered');
 });
 
 await test('an unregistered sender is stored but not fanned out', async () => {
   const r = await req('POST', '/email/inbound', {
     body: { from: 'stranger@nowhere.test', subject: 'hi', text: 'x' },
   });
-  const row = DB.prepare(`SELECT forwarded_to_webhook FROM inbound_emails WHERE inbound_id = ?`).get(r.json.inbound_id);
+  const row = DB.prepare(`SELECT agent_id, forwarded_to_webhook FROM inbound_emails WHERE inbound_id = ?`).get(r.json.inbound_id);
+  eq(row.agent_id, 'system');
   eq(Number(row.forwarded_to_webhook), 0);
+  eq(Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(r.json.inbound_id).c), 0, 'no charge');
 });
 
 /* -------------------------------------------------------------------------- */
@@ -709,7 +777,7 @@ await test('weekly cron posts one meter summary per endpoint', async () => {
     return realFetchSaved(input, init);
   };
 
-  await runCron('0 0 0 * * 0');
+  await runCron(WEEKLY_BILLING_CRON);
   globalThis.fetch = realFetchSaved;
 
   assert(STRIPE_CALLS.length >= 2, `expected >=2 stripe calls, got ${STRIPE_CALLS.length}`);
@@ -742,7 +810,7 @@ await test('a Stripe outage leaves charges pending (money is never lost)', async
     }
     return saved(input, init);
   };
-  await runCron('0 0 0 * * 0');
+  await runCron(WEEKLY_BILLING_CRON);
   globalThis.fetch = saved;
 
   const pendingAfter = Number(
@@ -753,6 +821,114 @@ await test('a Stripe outage leaves charges pending (money is never lost)', async
   const run = DB.prepare(`SELECT status, error FROM billing_runs ORDER BY executed_at DESC LIMIT 1`).get();
   eq(run.status, 'failed');
   assert(/API is down/.test(run.error), `run error was ${run.error}`);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Inbound billing                                                            */
+/* -------------------------------------------------------------------------- */
+
+suite('inbound billing');
+
+const INBOUND_KEY = generateApiKey();
+const INBOUND_AGENT = 'inbound-owner';
+await DB.prepare(
+  `INSERT INTO api_keys (key_id, agent_id, agent_name, key_hash, key_lookup, stripe_customer_id, status, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`
+).bind(
+  'key_inbound_owner',
+  INBOUND_AGENT,
+  'Inbound Owner',
+  await hashApiKey(INBOUND_KEY, 100000),
+  await keyLookupDigest(INBOUND_KEY),
+  'cus_inbound',
+  new Date().toISOString()
+).run();
+
+const AUTH_IN = { authorization: `Bearer ${INBOUND_KEY}` };
+
+await test('routed inbound charges the owner once and not for the fan-out', async () => {
+  const rr = await req('POST', '/api/inbound/routes', {
+    headers: AUTH_IN,
+    body: { from: 'paid@corp.test', callback_webhook: 'https://inbound-owner.test/cb' },
+  });
+  assert(rr.status === 201, `route create ${rr.status}`);
+
+  const r = await req('POST', '/email/inbound', {
+    body: { from: 'paid@corp.test', to: 'noreply@webhooks.email', subject: 'Pay up', text: 'body' },
+  });
+  assert(r.status === 200, `status ${r.status}`);
+  assert(r.json.forwarded_event_id, 'routed inbound should be forwarded');
+
+  const inboundId = r.json.inbound_id;
+  const chg = DB.prepare(`SELECT agent_id, endpoint, amount_usd FROM charges WHERE ref_id = ?`).allSync(inboundId);
+  eq(chg.length, 1, 'exactly one charge for a routed inbound');
+  eq(chg[0].agent_id, INBOUND_AGENT);
+  eq(chg[0].endpoint, 'email.inbound');
+  eq(Number(chg[0].amount_usd), 0.0005);
+
+  const wrow = DB.prepare(`SELECT agent_id FROM webhooks WHERE event_id = ?`).get(r.json.forwarded_event_id);
+  eq(wrow.agent_id, INBOUND_AGENT, 'fan-out webhook owned by the route owner');
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ? AND endpoint = 'webhook.send'`).get(r.json.forwarded_event_id).c),
+    0,
+    'fan-out is not separately charged'
+  );
+
+  const ok = await req('GET', `/webhooks/${r.json.forwarded_event_id}`, { headers: AUTH_IN });
+  assert(ok.status === 200, `owner should read own inbound webhook: ${ok.status}`);
+  const bad = await req('GET', `/webhooks/${r.json.forwarded_event_id}`, { headers: AUTH });
+  assert(bad.status === 403, `other agent must be forbidden: ${bad.status}`);
+});
+
+await test('unrouted inbound stays under system with no charge', async () => {
+  const r = await req('POST', '/email/inbound', {
+    body: { from: 'orphan@nowhere.test', subject: 'x', text: 'y' },
+  });
+  const row = DB.prepare(`SELECT agent_id FROM inbound_emails WHERE inbound_id = ?`).get(r.json.inbound_id);
+  eq(row.agent_id, 'system');
+  eq(Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(r.json.inbound_id).c), 0);
+});
+
+await test('a wildcard route catches any sender and bills its owner', async () => {
+  // The routes API validates `from` as an email address, so register the
+  // catch-all directly. The DB and fan-out path both support '*'.
+  await DB.prepare(
+    `INSERT INTO inbound_routes (from_email, agent_id, callback_webhook, created_at)
+     VALUES ('*', ?, 'https://wild.test/cb', ?)`
+  ).bind(AGENT_ID, new Date().toISOString()).run();
+
+  const r = await req('POST', '/email/inbound', {
+    body: { from: 'anyone@random.test', subject: 'wild', text: 'z' },
+  });
+  assert(r.json.forwarded_event_id, 'wildcard should forward');
+  const chg = DB.prepare(`SELECT agent_id, endpoint FROM charges WHERE ref_id = ?`).allSync(r.json.inbound_id);
+  eq(chg.length, 1);
+  eq(chg[0].agent_id, AGENT_ID);
+  eq(chg[0].endpoint, 'email.inbound');
+});
+
+await test('weekly billing meters routed inbound as email_inbound for its owner', async () => {
+  STRIPE_CALLS.length = 0;
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.startsWith('https://api.stripe.com')) {
+      STRIPE_CALLS.push({ url, body: init.body });
+      return new Response(JSON.stringify({ id: 'meter_evt_inbound' }), { status: 200 });
+    }
+    return saved(input, init);
+  };
+  await runCron(WEEKLY_BILLING_CRON);
+  globalThis.fetch = saved;
+
+  const inbound = STRIPE_CALLS.map((c) => new URLSearchParams(c.body)).filter(
+    (p) => p.get('event_name') === 'email_inbound'
+  );
+  const mine = inbound.find(
+    (p) => p.get('payload[summarized_by][stripe_customer_id]') === 'cus_inbound'
+  );
+  assert(mine, `no email_inbound summary for the inbound owner: ${inbound.map((p) => p.toString())}`);
+  eq(mine.get('payload[value]'), '1', 'owner should be metered exactly one inbound email');
 });
 
 /* -------------------------------------------------------------------------- */
