@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS inboxes (
   FOREIGN KEY(agent_id) REFERENCES api_keys(agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_inboxes_agent ON inboxes(agent_id);
+ALTER TABLE inboxes ADD COLUMN allowed_senders TEXT;
 
 -- ---------------------------------------------------------------------------
 -- Charges (metering)
@@ -206,3 +207,12 @@ CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);
 
 -- Spec 012: tags on outbound emails
 ALTER TABLE emails ADD COLUMN tags TEXT;
+
+-- Spec 013
+ALTER TABLE inbound_emails ADD COLUMN message_id TEXT;
+ALTER TABLE inbound_emails ADD COLUMN in_reply_to TEXT;
+ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT;
+ALTER TABLE inbound_emails ADD COLUMN reply_text TEXT;
+ALTER TABLE inbound_emails ADD COLUMN reply_text_confidence TEXT;
+CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(inbox_id, thread_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbound_sender_inbox ON inbound_emails(inbox_id, from_email);

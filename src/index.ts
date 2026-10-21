@@ -6,7 +6,7 @@ import { base, notFound, onError, requireAuth, trackMetrics } from './middleware
 import { sendWebhook, webhookStatus } from './api/webhooks';
 import { chargesSummaryRoute, emailStatus, sendEmailRoute } from './api/email';
 import { handleRawMessage, inboundRoute } from './api/inbound';
-import { createInbox, deleteInbox, inboxMessages, listInboxes, patchInbox } from './api/inboxes';
+import { createInbox, deleteInbox, inboxMessages, listInboxes, patchInbox, replyInbox } from './api/inboxes';
 import { emailStatsRoute } from './api/stats';
 import { sandboxMessages, sandboxPage, sandboxSession } from './api/sandbox';
 import { stripeWebhook } from './api/stripe';
@@ -136,6 +136,9 @@ app.delete('/api/inboxes/:inboxId', deleteInbox);
 
 app.use('/api/inboxes/:inboxId/messages', auth);
 app.get('/api/inboxes/:inboxId/messages', inboxMessages);
+
+app.use('/api/inboxes/:inboxId/reply', auth);
+app.post('/api/inboxes/:inboxId/reply', replyInbox);
 
 /* -------------------------------------------------------------------------- */
 /*  Exports                                                                    */

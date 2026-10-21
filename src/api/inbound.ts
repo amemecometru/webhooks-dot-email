@@ -6,6 +6,7 @@ import { logChargeAsync, SYSTEM_AGENT_ID } from '../lib/charge-logger';
 import { consumeLimit } from '../lib/rate-limit';
 import { nowIso, utcDay } from '../db/queries';
 import { inboundEmailSchema } from '../types';
+import { extractReply } from '../lib/reply-parse';
 import { parseJson } from './webhooks';
 
 /**
@@ -27,6 +28,9 @@ export type InboundRecord = {
   body: string;
   /** Raw Authentication-Results header, when the ingress supplied one. */
   authResults?: string | null;
+  messageId?: string | null;
+  inReplyTo?: string | null;
+  references?: string | null;
 };
 
 export type InboundResult = {
@@ -34,7 +38,7 @@ export type InboundResult = {
   forwardedEventId: string | null;
 };
 
-type InboundStatus = 'accepted' | 'rejected_auth' | 'unrouted' | 'rate_limited';
+type InboundStatus = 'accepted' | 'rejected_auth' | 'rejected_sender' | 'unrouted' | 'rate_limited';
 
 /**
  * Drop mail that fails authentication only when both the domain-level check
@@ -54,14 +58,37 @@ async function insertInbound(
   rec: InboundRecord,
   agentId: string,
   status: InboundStatus,
-  inboxId: string | null = null
+  inboxId: string | null = null,
+  extras?: {
+    messageId?: string | null;
+    inReplyTo?: string | null;
+    threadId?: string | null;
+    replyText?: string | null;
+    replyConfidence?: string | null;
+  }
 ): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO inbound_emails
-       (inbound_id, from_email, to_email, subject, body, agent_id, inbox_id, status, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (inbound_id, from_email, to_email, subject, body, agent_id, inbox_id, status, received_at,
+        message_id, in_reply_to, thread_id, reply_text, reply_text_confidence)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(inboundId, rec.from, rec.to, rec.subject, rec.body, agentId, inboxId, status, nowIso())
+    .bind(
+      inboundId,
+      rec.from,
+      rec.to,
+      rec.subject,
+      rec.body,
+      agentId,
+      inboxId,
+      status,
+      nowIso(),
+      extras?.messageId ?? null,
+      extras?.inReplyTo ?? null,
+      extras?.threadId ?? null,
+      extras?.replyText ?? null,
+      extras?.replyConfidence ?? null
+    )
     .run();
 }
 
@@ -81,11 +108,25 @@ export async function storeInbound(env: Env, rec: InboundRecord): Promise<Inboun
   // Normalise the destination address.
   rec.to = (rec.to ?? '').toLowerCase();
 
+  const messageId = rec.messageId && rec.messageId.trim() ? rec.messageId.trim() : `<${inboundId}@webhooks.email>`;
+  const { reply: replyText, confidence: replyConfidence } = extractReply(rec.body ?? '');
+  const rootId =
+    (rec.references || '').trim().split(/\s+/)[0] ||
+    (rec.inReplyTo || '').trim() ||
+    messageId;
+  const threadDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rootId));
+  const threadId = [...new Uint8Array(threadDigest)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 16);
+
+  const extras = { messageId, inReplyTo: rec.inReplyTo ?? null, threadId, replyText, replyConfidence };
+
   // Authentication failures are recorded for audit but never billed or fanned
   // out. This runs before route resolution so a spoofed sender cannot consume
   // the route owner's inbound quota.
   if (authRejected(rec.authResults)) {
-    await insertInbound(env, inboundId, rec, SYSTEM_AGENT_ID, 'rejected_auth');
+    await insertInbound(env, inboundId, rec, SYSTEM_AGENT_ID, 'rejected_auth', null, extras);
     console.log(
       JSON.stringify({
         event: 'email.inbound.rejected_auth',
@@ -99,6 +140,35 @@ export async function storeInbound(env: Env, rec: InboundRecord): Promise<Inboun
   // Resolve: inbox wins over sender routes.
   const inbox = await resolveInbox(env.DB, rec.to);
   const senderRoute = inbox ? null : await resolveInboundRoute(env.DB, rec.from);
+
+  // Per-inbox sender allowlist.
+  if (inbox) {
+    let allowed: string[] | null = null;
+    try {
+      if (inbox.allowed_senders) allowed = JSON.parse(inbox.allowed_senders);
+    } catch {
+      allowed = null;
+    }
+    if (Array.isArray(allowed) && allowed.length > 0) {
+      const sender = rec.from.toLowerCase();
+      const ok = allowed.some((entry) => {
+        const e = String(entry).toLowerCase();
+        if (e.startsWith('@')) return sender.endsWith(e);
+        return e === sender;
+      });
+      if (!ok) {
+        await insertInbound(env, inboundId, rec, inbox.agent_id, 'rejected_sender', inbox.inbox_id, extras);
+        console.log(
+          JSON.stringify({
+            event: 'email.inbound.rejected_sender',
+            inbound_id: inboundId,
+            from: rec.from,
+          })
+        );
+        return { inboundId, forwardedEventId: null };
+      }
+    }
+  }
 
   let target: {
     agent_id: string;
@@ -162,7 +232,7 @@ export async function storeInbound(env: Env, rec: InboundRecord): Promise<Inboun
     }
 
     if (capped) {
-      await insertInbound(env, inboundId, rec, ownerId, 'rate_limited', target.inbox_id);
+      await insertInbound(env, inboundId, rec, ownerId, 'rate_limited', target.inbox_id, extras);
       console.log(
         JSON.stringify({
           event: 'email.inbound.rate_limited',
@@ -181,7 +251,8 @@ export async function storeInbound(env: Env, rec: InboundRecord): Promise<Inboun
     rec,
     ownerId,
     target ? 'accepted' : 'unrouted',
-    target?.inbox_id ?? null
+    target?.inbox_id ?? null,
+    extras
   );
 
   if (target) {
@@ -201,6 +272,11 @@ export async function storeInbound(env: Env, rec: InboundRecord): Promise<Inboun
       callbackWebhook: inbox?.callback_url ?? null,
       agentId: inbox?.agent_id ?? null,
       receivedAt: nowIso(),
+      messageId,
+      threadId,
+      inReplyTo: rec.inReplyTo ?? null,
+      replyText,
+      replyConfidence,
     });
     eventId = fanned?.eventId ?? null;
   } catch (err) {
@@ -240,6 +316,9 @@ export async function inboundRoute(c: Ctx): Promise<Response> {
     to: input.to ?? 'webhooks.email',
     subject: input.subject,
     body: input.text,
+    messageId: input.message_id ?? null,
+    inReplyTo: input.in_reply_to ?? null,
+    references: input.references ?? null,
   });
 
   return c.json({
@@ -266,6 +345,9 @@ export async function handleRawMessage(
   let subject = '';
   let body = '';
   let authResults: string | null = null;
+  let messageId: string | null = null;
+  let inReplyTo: string | null = null;
+  let references: string | null = null;
 
   try {
     const parsed = await parseMime.parse(raw);
@@ -278,12 +360,24 @@ export async function handleRawMessage(
         ?.filter((h) => h.key.toLowerCase() === 'authentication-results')
         .map((h) => h.value)
         .join('; ') || null;
+    messageId =
+      parsed.headers
+        ?.find((h) => h.key.toLowerCase() === 'message-id')
+        ?.value?.trim() || null;
+    inReplyTo =
+      parsed.headers
+        ?.find((h) => h.key.toLowerCase() === 'in-reply-to')
+        ?.value?.trim() || null;
+    references =
+      parsed.headers
+        ?.find((h) => h.key.toLowerCase() === 'references')
+        ?.value?.trim() || null;
   } catch (err) {
     console.error('MIME parse failed, storing raw:', (err as Error).message);
     body = raw.slice(0, 100_000);
   }
 
-  const task = storeInbound(env, { from, to, subject, body, authResults }).catch((err) =>
+  const task = storeInbound(env, { from, to, subject, body, authResults, messageId, inReplyTo, references }).catch((err) =>
     console.error('storeInbound failed:', (err as Error).message)
   );
 

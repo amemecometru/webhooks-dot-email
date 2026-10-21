@@ -307,6 +307,7 @@ export interface InboxRecord {
   agent_id: string;
   callback_url: string;
   address: string;
+  allowed_senders: string | null;
 }
 
 /** Resolve an active inbox by its address. */
@@ -316,7 +317,7 @@ export async function resolveInbox(
 ): Promise<InboxRecord | null> {
   return db
     .prepare(
-      `SELECT inbox_id, agent_id, callback_url, address FROM inboxes
+      `SELECT inbox_id, agent_id, callback_url, address, allowed_senders FROM inboxes
         WHERE address = ? AND status = 'active'
         LIMIT 1`
     )
@@ -339,6 +340,11 @@ export async function fanOutInbound(
     callbackWebhook?: string | null;
     agentId?: string | null;
     receivedAt?: string | null;
+    messageId?: string | null;
+    threadId?: string | null;
+    inReplyTo?: string | null;
+    replyText?: string | null;
+    replyConfidence?: string | null;
   }
 ): Promise<{ eventId: string; agentId: string } | null> {
   const agentId = args.agentId ?? args.route?.agent_id ?? null;
@@ -355,11 +361,18 @@ export async function fanOutInbound(
       event: 'email.inbound',
       inbox_id: args.inboxId ?? null,
       inbound_id: args.inboundId,
+      message_id: args.messageId ?? null,
+      thread_id: args.threadId ?? null,
+      in_reply_to: args.inReplyTo ?? null,
       from: args.from,
       to: args.to,
       subject: args.subject,
       text: args.body,
+      reply_text: args.replyText ?? '',
+      reply_text_confidence: args.replyConfidence ?? 'low',
+      content_trust: 'external',
       received_at: args.receivedAt ?? nowIso(),
+      attachments: [],
     },
   });
   return { eventId, agentId };

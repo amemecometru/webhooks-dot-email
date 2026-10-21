@@ -33,6 +33,8 @@ export interface Env {
   FREE_INBOXES_MAX: string;
   FREE_INBOUND_PER_DAY: string;
   FREE_SEND_PER_MONTH: string;
+  REPLY_WINDOW_DAYS: string;
+  REPLY_PER_INBOX_PER_HOUR: string;
   SANDBOX_LINK_TTL_SECONDS: string;
   RETENTION_DAYS_FREE: string;
   RETENTION_DAYS_PAID: string;
@@ -148,6 +150,8 @@ export const inboundEmailSchema = z
     text: z.string().max(1_000_000).default(''),
     html: z.string().max(2_000_000).optional(),
     message_id: z.string().max(512).optional(),
+    in_reply_to: z.string().max(512).optional(),
+    references: z.string().max(4096).optional(),
   })
   .strict();
 
@@ -206,11 +210,16 @@ export const inboxPatchSchema = z
   .object({
     callback_url: httpsUrl.optional(),
     status: z.enum(['active', 'disabled']).optional(),
+    allowed_senders: z.array(z.string()).max(50).optional().nullable(),
   })
   .strict()
-  .refine((v) => v.callback_url !== undefined || v.status !== undefined, {
-    message: 'at least one field is required',
-  });
+  .refine(
+    (v) =>
+      v.callback_url !== undefined ||
+      v.status !== undefined ||
+      v.allowed_senders !== undefined,
+    { message: 'at least one field is required' }
+  );
 
 export type InboxPatchRequest = z.infer<typeof inboxPatchSchema>;
 

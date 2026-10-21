@@ -163,6 +163,19 @@ export async function ensureDB(db: D1Database): Promise<void> {
       if (!hasTags) {
         await db.prepare(`ALTER TABLE emails ADD COLUMN tags TEXT`).run();
       }
+
+      // Spec 013: idempotent column migrations.
+      const inboxInfo = await db.prepare(`PRAGMA table_info(inboxes)`).all<{ name: string }>();
+      if (!(inboxInfo.results ?? []).some((c) => c.name === 'allowed_senders')) {
+        await db.prepare(`ALTER TABLE inboxes ADD COLUMN allowed_senders TEXT`).run();
+      }
+      const inboundInfo = await db.prepare(`PRAGMA table_info(inbound_emails)`).all<{ name: string }>();
+      const inboundCols = (inboundInfo.results ?? []).map((c) => c.name);
+      if (!inboundCols.includes('message_id')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN message_id TEXT`).run();
+      if (!inboundCols.includes('in_reply_to')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN in_reply_to TEXT`).run();
+      if (!inboundCols.includes('thread_id')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT`).run();
+      if (!inboundCols.includes('reply_text')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN reply_text TEXT`).run();
+      if (!inboundCols.includes('reply_text_confidence')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN reply_text_confidence TEXT`).run();
     })().catch((err) => {
       console.error('ensureDB failed:', (err as Error)?.message ?? err);
       ensured = null;
