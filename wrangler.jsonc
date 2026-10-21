@@ -13,9 +13,9 @@
   "preview_urls": true,
 
   "routes": [
-    { "pattern": "webhooks.email/*", "custom_domain": true },
-    { "pattern": "mcp.webhooks.email/*", "custom_domain": true },
-    { "pattern": "api.webhooks.email/*", "custom_domain": true }
+    { "pattern": "webhooks.email", "custom_domain": true },
+    { "pattern": "mcp.webhooks.email", "custom_domain": true },
+    { "pattern": "api.webhooks.email", "custom_domain": true }
   ],
 
   "d1_databases": [
