@@ -135,10 +135,12 @@ const STATEMENTS = [
 
   `CREATE INDEX IF NOT EXISTS idx_webhooks_due   ON webhooks(status, next_attempt_at)`,
   `CREATE INDEX IF NOT EXISTS idx_emails_due     ON emails(status, next_attempt_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_agent_created ON emails(agent_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_charges_period ON charges(status, period_start)`,
   `CREATE INDEX IF NOT EXISTS idx_keys_lookup   ON api_keys(key_lookup)`,
   `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
   `CREATE INDEX IF NOT EXISTS idx_inboxes_agent ON inboxes(agent_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_inbound_inbox_received ON inbound_emails(inbox_id, received_at DESC)`,
 ];
 
 let ensured: Promise<void> | null = null;

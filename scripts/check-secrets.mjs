@@ -31,6 +31,7 @@ const REQUIRED = [
   ['STRIPE_METER_EMAIL_SEND', 'Billing meter id for email.send ($0.01).'],
   ['STRIPE_METER_WEBHOOK_SEND', 'Billing meter id for webhook.send ($0.001).'],
   ['STRIPE_METER_EMAIL_INBOUND', 'Billing meter id for email.inbound ($0.0005).'],
+  ['SANDBOX_SIGNING_SECRET', 'HMAC secret for signed sandbox viewer links.'],
 ];
 
 const WORKER = JSON.parse(

@@ -42,6 +42,29 @@ export async function sendEmailRoute(c: Ctx): Promise<Response> {
     console.error('rate_limit.error', (err as Error).message);
   }
 
+  // Free-plan monthly send cap. Paid plans skip the count entirely.
+  if (agent.plan === 'free') {
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+    const limit = Number(c.env.FREE_SEND_PER_MONTH || 100);
+    let count = 0;
+    try {
+      const row = await c.env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM emails WHERE agent_id = ? AND created_at >= ? AND status != 'failed'`
+      )
+        .bind(agent.agent_id, monthStart)
+        .first<{ c: number }>();
+      count = Number(row?.c ?? 0);
+    } catch (err) {
+      console.error('free_send_count.error', (err as Error).message);
+      return c.json({ error: 'send_unavailable' }, 503);
+    }
+    if (count >= limit) {
+      const resetsAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+      return c.json({ error: 'free_send_limit_reached', limit, resets_at: resetsAt }, 402);
+    }
+  }
+
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const from = input.from ?? c.env.OUTBOUND_EMAIL;
   const callbackWebhook = input.callback_webhook ?? agent.default_callback_webhook ?? null;

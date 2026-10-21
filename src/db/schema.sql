@@ -193,9 +193,11 @@ CREATE INDEX IF NOT EXISTS idx_webhooks_due    ON webhooks(status, next_attempt_
 CREATE INDEX IF NOT EXISTS idx_emails_agent    ON emails(agent_id);
 CREATE INDEX IF NOT EXISTS idx_emails_status   ON emails(status);
 CREATE INDEX IF NOT EXISTS idx_emails_due      ON emails(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_emails_agent_created ON emails(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_inbound_from     ON inbound_emails(from_email);
 CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_emails(received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_inbound_inbox ON inbound_emails(inbox_id);
+CREATE INDEX IF NOT EXISTS idx_inbound_inbox_received ON inbound_emails(inbox_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_charges_agent   ON charges(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_charges_period  ON charges(status, period_start);
 CREATE INDEX IF NOT EXISTS idx_charges_run     ON charges(agent_id, period_start);

@@ -7,6 +7,7 @@ import { sendWebhook, webhookStatus } from './api/webhooks';
 import { chargesSummaryRoute, emailStatus, sendEmailRoute } from './api/email';
 import { handleRawMessage, inboundRoute } from './api/inbound';
 import { createInbox, deleteInbox, inboxMessages, listInboxes, patchInbox } from './api/inboxes';
+import { sandboxMessages, sandboxPage, sandboxSession } from './api/sandbox';
 import { stripeWebhook } from './api/stripe';
 import {
   createInboundRoute,
@@ -18,6 +19,7 @@ import {
 } from './api/meta';
 import { drainEmails, drainWebhooks, requeueStuckSends } from './lib/queue';
 import { weeklyBilling } from './lib/billing';
+import { purgeOldMessages } from './lib/retention';
 import { cleanupRateLimits } from './lib/rate-limit';
 import { WEEKLY_BILLING_CRON } from './config/schedules';
 
@@ -83,6 +85,10 @@ app.post('/api/keys/generate', generateKey);
 // this endpoint exists so inbound can be exercised with curl.
 app.post('/email/inbound', trackMetrics('email.inbound'), inboundRoute);
 
+// Public sandbox viewer (signed links).
+app.get('/sandbox/:token', sandboxPage);
+app.get('/sandbox/:token/messages.json', sandboxMessages);
+
 /* -------------------------------------------------------------------------- */
 /*  Authenticated routes                                                       */
 /*                                                                             */
@@ -112,6 +118,9 @@ app.get('/api/charges/summary', trackMetrics('charges.summary'), chargesSummaryR
 app.use('/api/inbound/routes', auth);
 app.get('/api/inbound/routes', listInboundRoutes);
 app.post('/api/inbound/routes', createInboundRoute);
+
+app.use('/api/sandbox/session', auth);
+app.post('/api/sandbox/session', sandboxSession);
 
 app.use('/api/inboxes', auth);
 app.get('/api/inboxes', listInboxes);
@@ -154,6 +163,11 @@ export default {
           console.error('rate_limits cleanup failed:', (err as Error).message)
         );
         await weeklyBilling(env, new Date(controller.scheduledTime));
+        try {
+          await purgeOldMessages(env, new Date(controller.scheduledTime));
+        } catch (err) {
+          console.error('retention purge failed:', (err as Error).message);
+        }
         return;
       }
 

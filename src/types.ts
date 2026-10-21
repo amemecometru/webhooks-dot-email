@@ -32,12 +32,17 @@ export interface Env {
   PAID_INBOXES_MAX: string;
   FREE_INBOXES_MAX: string;
   FREE_INBOUND_PER_DAY: string;
+  FREE_SEND_PER_MONTH: string;
+  SANDBOX_LINK_TTL_SECONDS: string;
+  RETENTION_DAYS_FREE: string;
+  RETENTION_DAYS_PAID: string;
 
   STRIPE_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_METER_EMAIL_SEND?: string;
   STRIPE_METER_WEBHOOK_SEND?: string;
   STRIPE_METER_EMAIL_INBOUND?: string;
+  SANDBOX_SIGNING_SECRET?: string;
 }
 
 export type Agent = {
