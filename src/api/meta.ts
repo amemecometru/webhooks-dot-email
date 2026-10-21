@@ -1,7 +1,9 @@
 import { PUBLIC_PRICING } from '../config/pricing';
 import { leaderboard, metricRows, statusCounts } from '../db/queries';
 import { generateApiKey, hashApiKey, keyLookupDigest } from '../lib/crypto';
-import { nowIso, weekWindow } from '../db/queries';
+import { nowIso, utcDay, weekWindow } from '../db/queries';
+import { consumeLimit, rateLimitResponse } from '../lib/rate-limit';
+import { getCustomer } from '../lib/stripe-metering';
 import { generateKeySchema, inboundRouteSchema , type Ctx } from '../types';
 import { parseJson } from './webhooks';
 
@@ -112,6 +114,42 @@ export async function generateKey(c: Ctx): Promise<Response> {
       { error: 'agent_exists', detail: 'this agent_id already has a key; keys are not re-issuable' },
       409
     );
+  }
+
+  // Per-IP cap. Fail closed: an unusable counter would otherwise let a caller
+  // mint keys without bound.
+  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
+  const keyLimit = Number(c.env.KEYS_PER_IP_PER_DAY || 5);
+  let keyAllowance;
+  try {
+    keyAllowance = await consumeLimit(
+      c.env.DB,
+      `keys:${ip}:${utcDay()}`,
+      keyLimit,
+      24 * 60 * 60
+    );
+  } catch (err) {
+    console.error('rate_limit.error', (err as Error).message);
+    return c.json({ error: 'rate_limit_unavailable' }, 503);
+  }
+
+  if (!keyAllowance.allowed) {
+    rateLimitResponse(c, keyAllowance.retryAfter);
+    return c.json({ error: 'rate_limited' }, 429);
+  }
+
+  // Verify the customer before attaching usage to them. A Stripe outage is not
+  // permission to create an unverifiable key.
+  let customer: { exists: boolean };
+  try {
+    customer = await getCustomer(c.env, input.stripe_customer_id);
+  } catch (err) {
+    console.error('customer lookup failed:', (err as Error).message);
+    return c.json({ error: 'billing_unavailable' }, 503);
+  }
+
+  if (!customer.exists) {
+    return c.json({ error: 'unknown_customer' }, 400);
   }
 
   const rawKey = generateApiKey();

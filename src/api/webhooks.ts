@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PRICING } from '../config/pricing';
 import { enqueueWebhook, getWebhook } from '../db/queries';
 import { logChargeAsync } from '../lib/charge-logger';
+import { consumeLimit, rateLimitResponse, sendBucket, sendLimit } from '../lib/rate-limit';
 import { sendWebhookSchema , type Ctx } from '../types';
 
 /** POST /webhooks/send  — 202 Accepted, charged $0.001 */
@@ -20,6 +21,18 @@ export async function sendWebhook(c: Ctx): Promise<Response> {
     );
   }
   const input = parsed.data;
+
+  // Paid sends fail open: a counter outage must not block a customer's request.
+  try {
+    const bucket = sendBucket(agent.agent_id);
+    const limit = await consumeLimit(c.env.DB, bucket, sendLimit(c.env), 60);
+    if (!limit.allowed) {
+      rateLimitResponse(c, limit.retryAfter);
+      return c.json({ error: 'rate_limited' }, 429);
+    }
+  } catch (err) {
+    console.error('rate_limit.error', (err as Error).message);
+  }
 
   const eventId = `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
 

@@ -53,6 +53,10 @@
     "DELIVERY_BATCH_SIZE": "25",
     "CHARGE_ENDPOINT": "email.send",
     "CHARGE_WEBHOOK_ENDPOINT": "webhook.send",
-    "CHARGE_INBOUND_ENDPOINT": "email.inbound"
+    "CHARGE_INBOUND_ENDPOINT": "email.inbound",
+    "KEYS_PER_IP_PER_DAY": "5",
+    "SEND_PER_AGENT_PER_MINUTE": "60",
+    "INBOUND_PER_ROUTE_PER_DAY": "1000",
+    "INBOUND_WILDCARD_PER_DAY": "200"
   }
 }

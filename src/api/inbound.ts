@@ -3,7 +3,8 @@ import type { Env, Ctx } from '../types';
 import { PRICING } from '../config/pricing';
 import { fanOutInbound, resolveInboundRoute } from '../lib/queue';
 import { logChargeAsync, SYSTEM_AGENT_ID } from '../lib/charge-logger';
-import { nowIso } from '../db/queries';
+import { consumeLimit } from '../lib/rate-limit';
+import { nowIso, utcDay } from '../db/queries';
 import { inboundEmailSchema } from '../types';
 import { parseJson } from './webhooks';
 
@@ -24,6 +25,8 @@ export type InboundRecord = {
   to: string;
   subject: string;
   body: string;
+  /** Raw Authentication-Results header, when the ingress supplied one. */
+  authResults?: string | null;
 };
 
 export type InboundResult = {
@@ -31,21 +34,94 @@ export type InboundResult = {
   forwardedEventId: string | null;
 };
 
+type InboundStatus = 'accepted' | 'rejected_auth' | 'unrouted' | 'rate_limited';
+
+/**
+ * Drop mail that fails authentication only when both the domain-level check
+ * (DMARC or SPF) and DKIM fail. A missing header is not evidence of failure.
+ */
+function authRejected(authResults: string | null | undefined): boolean {
+  if (!authResults) return false;
+  const value = authResults.toLowerCase();
+  const dkimFailed = /\bdkim=fail\b/.test(value);
+  const dmarcOrSpfFailed = /\bdmarc=fail\b/.test(value) || /\bspf=fail\b/.test(value);
+  return dkimFailed && dmarcOrSpfFailed;
+}
+
+async function insertInbound(
+  env: Env,
+  inboundId: string,
+  rec: InboundRecord,
+  agentId: string,
+  status: InboundStatus
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO inbound_emails
+       (inbound_id, from_email, to_email, subject, body, agent_id, status, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(inboundId, rec.from, rec.to, rec.subject, rec.body, agentId, status, nowIso())
+    .run();
+}
+
 export async function storeInbound(env: Env, rec: InboundRecord): Promise<InboundResult> {
   const inboundId = `inb_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+
+  // Authentication failures are recorded for audit but never billed or fanned
+  // out. This runs before route resolution so a spoofed sender cannot consume
+  // the route owner's inbound quota.
+  if (authRejected(rec.authResults)) {
+    await insertInbound(env, inboundId, rec, SYSTEM_AGENT_ID, 'rejected_auth');
+    console.log(
+      JSON.stringify({
+        event: 'email.inbound.rejected_auth',
+        inbound_id: inboundId,
+        from: rec.from,
+      })
+    );
+    return { inboundId, forwardedEventId: null };
+  }
 
   // Resolve once: the route owner pays for inbound and owns the fan-out
   // webhook. Unrouted mail is stored for audit under 'system' but not charged.
   const route = await resolveInboundRoute(env.DB, rec.from);
   const ownerId = route?.agent_id ?? SYSTEM_AGENT_ID;
 
-  await env.DB.prepare(
-    `INSERT INTO inbound_emails
-       (inbound_id, from_email, to_email, subject, body, agent_id, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(inboundId, rec.from, rec.to, rec.subject, rec.body, ownerId, nowIso())
-    .run();
+  if (route) {
+    const wildcard = route.from_email === '*';
+    const limit = Number(
+      wildcard
+        ? env.INBOUND_WILDCARD_PER_DAY || 200
+        : env.INBOUND_PER_ROUTE_PER_DAY || 1000
+    );
+    const bucket = `inbound:${route.from_email}:${utcDay()}`;
+
+    // Fail closed for inbound: an unusable counter must not turn into an
+    // uncapped fan-out on the route owner's bill.
+    let capped = false;
+    try {
+      const allowance = await consumeLimit(env.DB, bucket, limit, 24 * 60 * 60);
+      capped = !allowance.allowed;
+    } catch (err) {
+      console.error('rate_limit.error', (err as Error).message);
+      capped = true;
+    }
+
+    if (capped) {
+      await insertInbound(env, inboundId, rec, ownerId, 'rate_limited');
+      console.log(
+        JSON.stringify({
+          event: 'email.inbound.rate_limited',
+          inbound_id: inboundId,
+          from: rec.from,
+          route: route.from_email,
+        })
+      );
+      return { inboundId, forwardedEventId: null };
+    }
+  }
+
+  await insertInbound(env, inboundId, rec, ownerId, route ? 'accepted' : 'unrouted');
 
   if (route) {
     logChargeAsync(env, route.agent_id, 'email.inbound', inboundId);
@@ -124,6 +200,7 @@ export async function handleRawMessage(
   let to = message.to.toLowerCase();
   let subject = '';
   let body = '';
+  let authResults: string | null = null;
 
   try {
     const parsed = await parseMime.parse(raw);
@@ -131,12 +208,17 @@ export async function handleRawMessage(
     to = (parsed.to?.[0]?.address ?? to).toLowerCase();
     subject = parsed.subject ?? '';
     body = parsed.text || stripHtml(parsed.html ?? '');
+    authResults =
+      parsed.headers
+        ?.filter((h) => h.key.toLowerCase() === 'authentication-results')
+        .map((h) => h.value)
+        .join('; ') || null;
   } catch (err) {
     console.error('MIME parse failed, storing raw:', (err as Error).message);
     body = raw.slice(0, 100_000);
   }
 
-  const task = storeInbound(env, { from, to, subject, body }).catch((err) =>
+  const task = storeInbound(env, { from, to, subject, body, authResults }).catch((err) =>
     console.error('storeInbound failed:', (err as Error).message)
   );
 
