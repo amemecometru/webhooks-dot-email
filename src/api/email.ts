@@ -12,6 +12,7 @@ import { fastPathSend } from '../lib/queue';
 import { consumeLimit, rateLimitResponse, sendBucket, sendLimit } from '../lib/rate-limit';
 import { chargesSummaryQuerySchema, sendEmailSchema , type Ctx } from '../types';
 import { parseJson } from './webhooks';
+import { normaliseTags } from '../lib/tags';
 
 /** POST /email/send — 202 Accepted, charged $0.01 */
 export async function sendEmailRoute(c: Ctx): Promise<Response> {
@@ -65,6 +66,17 @@ export async function sendEmailRoute(c: Ctx): Promise<Response> {
     }
   }
 
+  const tags = normaliseTags(input.tags);
+  if (tags === undefined) {
+    return c.json(
+      {
+        error: 'validation_failed',
+        details: [{ path: 'tags', message: 'invalid tag' }],
+      },
+      400
+    );
+  }
+
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const from = input.from ?? c.env.OUTBOUND_EMAIL;
   const callbackWebhook = input.callback_webhook ?? agent.default_callback_webhook ?? null;
@@ -79,6 +91,7 @@ export async function sendEmailRoute(c: Ctx): Promise<Response> {
     body: input.body,
     html: input.html ?? null,
     callbackWebhook,
+    tags,
   });
 
   logChargeAsync(c.env, agent.agent_id, 'email.send', messageId);
@@ -120,6 +133,14 @@ export async function emailStatus(c: Ctx): Promise<Response> {
   if (!row) return c.json({ error: 'not_found' }, 404);
   if (row.agent_id !== agent.agent_id) return c.json({ error: 'forbidden' }, 403);
 
+  let tags: string[] | null = null;
+  if (row.tags) {
+    try {
+      tags = JSON.parse(row.tags);
+    } catch {
+      tags = null;
+    }
+  }
   return c.json({
     message_id: row.message_id,
     status: row.status,
@@ -130,6 +151,7 @@ export async function emailStatus(c: Ctx): Promise<Response> {
     last_error: row.last_error,
     created_at: row.created_at,
     delivered_at: row.delivered_at,
+    tags,
   });
 }
 

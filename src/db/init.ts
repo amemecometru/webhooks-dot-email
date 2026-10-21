@@ -155,14 +155,19 @@ let ensured: Promise<void> | null = null;
  */
 export async function ensureDB(db: D1Database): Promise<void> {
   if (!ensured) {
-    ensured = db
-      .batch(STATEMENTS.map((sql) => db.prepare(sql)))
-      .then(() => undefined)
-      .catch((err) => {
-        console.error('ensureDB failed:', (err as Error)?.message ?? err);
-        ensured = null; // allow retry on a later cold start
-        throw err;
-      });
+    ensured = (async () => {
+      await db.batch(STATEMENTS.map((sql) => db.prepare(sql)));
+      // Spec 012: idempotent column migration for tags.
+      const info = await db.prepare(`PRAGMA table_info(emails)`).all<{ name: string }>();
+      const hasTags = (info.results ?? []).some((c) => c.name === 'tags');
+      if (!hasTags) {
+        await db.prepare(`ALTER TABLE emails ADD COLUMN tags TEXT`).run();
+      }
+    })().catch((err) => {
+      console.error('ensureDB failed:', (err as Error)?.message ?? err);
+      ensured = null;
+      throw err;
+    });
   }
   return ensured;
 }

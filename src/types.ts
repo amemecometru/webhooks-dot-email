@@ -130,6 +130,7 @@ export const sendEmailSchema = z
     from: emailSchema.optional(),
     reply_to: emailSchema.optional(),
     callback_webhook: httpsUrl.optional(),
+    tags: z.array(z.string()).max(5).optional(),
   })
   .strict();
 
@@ -243,6 +244,7 @@ export type EmailRow = {
   body: string;
   html: string | null;
   reply_to: string | null;
+  tags: string | null;
   status: 'queued' | 'sent' | 'delivered' | 'bounce' | 'failed';
   callback_webhook: string | null;
   attempts: number;

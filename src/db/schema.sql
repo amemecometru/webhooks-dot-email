@@ -203,3 +203,6 @@ CREATE INDEX IF NOT EXISTS idx_charges_period  ON charges(status, period_start);
 CREATE INDEX IF NOT EXISTS idx_charges_run     ON charges(agent_id, period_start);
 CREATE INDEX IF NOT EXISTS idx_keys_lookup    ON api_keys(key_lookup);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);
+
+-- Spec 012: tags on outbound emails
+ALTER TABLE emails ADD COLUMN tags TEXT;

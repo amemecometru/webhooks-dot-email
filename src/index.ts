@@ -7,6 +7,7 @@ import { sendWebhook, webhookStatus } from './api/webhooks';
 import { chargesSummaryRoute, emailStatus, sendEmailRoute } from './api/email';
 import { handleRawMessage, inboundRoute } from './api/inbound';
 import { createInbox, deleteInbox, inboxMessages, listInboxes, patchInbox } from './api/inboxes';
+import { emailStatsRoute } from './api/stats';
 import { sandboxMessages, sandboxPage, sandboxSession } from './api/sandbox';
 import { stripeWebhook } from './api/stripe';
 import {
@@ -121,6 +122,9 @@ app.post('/api/inbound/routes', createInboundRoute);
 
 app.use('/api/sandbox/session', auth);
 app.post('/api/sandbox/session', sandboxSession);
+
+app.use('/api/stats/emails', auth);
+app.get('/api/stats/emails', emailStatsRoute);
 
 app.use('/api/inboxes', auth);
 app.get('/api/inboxes', listInboxes);
