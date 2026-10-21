@@ -37,6 +37,8 @@ function buildMime(opts: {
   replyTo?: string | null;
   messageId: string;
   date: string;
+  inReplyTo?: string | null;
+  references?: string | null;
 }): string {
   const boundary = `wh_${opts.messageId.replace(/[^a-zA-Z0-9]/g, '')}`;
   const hasHtml = Boolean(opts.html);
@@ -50,6 +52,8 @@ function buildMime(opts: {
     `MIME-Version: 1.0`,
   ];
   if (opts.replyTo) headers.push(`Reply-To: ${opts.replyTo}`);
+  if (opts.inReplyTo) headers.push(`In-Reply-To: ${headerValue(opts.inReplyTo)}`);
+  if (opts.references) headers.push(`References: ${headerValue(opts.references)}`);
 
   let body: string;
   if (hasHtml) {
@@ -83,6 +87,8 @@ export async function sendEmail(
     html?: string | null;
     replyTo?: string | null;
     messageId: string;
+    inReplyTo?: string | null;
+    references?: string | null;
   }
 ): Promise<void> {
   const raw = buildMime({ ...msg, date: new Date().toUTCString() });

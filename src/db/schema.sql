@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   default_callback_webhook TEXT,
   status            TEXT NOT NULL DEFAULT 'active',  -- active | disabled
   leaderboard_optin INTEGER NOT NULL DEFAULT 0,
+  plan              TEXT NOT NULL DEFAULT 'paid',  -- free | paid
   created_at        TEXT NOT NULL,
   last_used_at      TEXT
 );
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   subject             TEXT NOT NULL,
   body                TEXT NOT NULL,
   agent_id            TEXT NOT NULL DEFAULT 'system', -- route owner, or 'system' if unrouted
+  inbox_id            TEXT,              -- set when an inbox matched
   forwarded_event_id  TEXT,               -- webhooks.event_id if we fanned it out
   forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
   status              TEXT NOT NULL DEFAULT 'accepted', -- accepted|rejected_auth|unrouted|rate_limited
@@ -110,6 +112,23 @@ CREATE TABLE IF NOT EXISTS inbound_routes (
   created_at      TEXT NOT NULL,
   FOREIGN KEY(agent_id) REFERENCES api_keys(agent_id)
 );
+
+
+-- ---------------------------------------------------------------------------
+-- Agent inboxes
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS inboxes (
+  inbox_id      TEXT PRIMARY KEY,           -- ib_<20 base32 chars>
+  agent_id      TEXT NOT NULL,
+  address       TEXT UNIQUE NOT NULL,       -- <inbox_id>@webhooks.email, lowercase
+  name          TEXT,
+  callback_url  TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'active',  -- active | disabled
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY(agent_id) REFERENCES api_keys(agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_inboxes_agent ON inboxes(agent_id);
+ALTER TABLE inboxes ADD COLUMN allowed_senders TEXT;
 
 -- ---------------------------------------------------------------------------
 -- Charges (metering)
@@ -175,10 +194,25 @@ CREATE INDEX IF NOT EXISTS idx_webhooks_due    ON webhooks(status, next_attempt_
 CREATE INDEX IF NOT EXISTS idx_emails_agent    ON emails(agent_id);
 CREATE INDEX IF NOT EXISTS idx_emails_status   ON emails(status);
 CREATE INDEX IF NOT EXISTS idx_emails_due      ON emails(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_emails_agent_created ON emails(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_inbound_from     ON inbound_emails(from_email);
 CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_emails(received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbound_inbox ON inbound_emails(inbox_id);
+CREATE INDEX IF NOT EXISTS idx_inbound_inbox_received ON inbound_emails(inbox_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_charges_agent   ON charges(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_charges_period  ON charges(status, period_start);
 CREATE INDEX IF NOT EXISTS idx_charges_run     ON charges(agent_id, period_start);
 CREATE INDEX IF NOT EXISTS idx_keys_lookup    ON api_keys(key_lookup);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);
+
+-- Spec 012: tags on outbound emails
+ALTER TABLE emails ADD COLUMN tags TEXT;
+
+-- Spec 013
+ALTER TABLE inbound_emails ADD COLUMN message_id TEXT;
+ALTER TABLE inbound_emails ADD COLUMN in_reply_to TEXT;
+ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT;
+ALTER TABLE inbound_emails ADD COLUMN reply_text TEXT;
+ALTER TABLE inbound_emails ADD COLUMN reply_text_confidence TEXT;
+CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(inbox_id, thread_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbound_sender_inbox ON inbound_emails(inbox_id, from_email);

@@ -55,7 +55,7 @@ export async function validateApiKey(key: string, env: Env): Promise<Agent | nul
 
   const row = await env.DB.prepare(
     `SELECT key_id, agent_id, stripe_customer_id, agent_name,
-            default_callback_webhook, key_hash, status
+            default_callback_webhook, key_hash, status, plan
        FROM api_keys
       WHERE key_lookup = ?
       LIMIT 1`
@@ -69,6 +69,7 @@ export async function validateApiKey(key: string, env: Env): Promise<Agent | nul
       default_callback_webhook: string | null;
       key_hash: string;
       status: string;
+      plan: string;
     }>()
     .catch((err) => {
       console.error('api_keys lookup failed:', err);
@@ -84,6 +85,7 @@ export async function validateApiKey(key: string, env: Env): Promise<Agent | nul
     stripe_customer_id: row.stripe_customer_id,
     agent_name: row.agent_name,
     default_callback_webhook: row.default_callback_webhook,
+    plan: row.plan === 'free' ? 'free' : 'paid',
   };
 
   if (cache.size >= MAX_CACHE_ENTRIES) {

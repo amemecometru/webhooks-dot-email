@@ -29,12 +29,22 @@ export interface Env {
   SEND_PER_AGENT_PER_MINUTE: string;
   INBOUND_PER_ROUTE_PER_DAY: string;
   INBOUND_WILDCARD_PER_DAY: string;
+  PAID_INBOXES_MAX: string;
+  FREE_INBOXES_MAX: string;
+  FREE_INBOUND_PER_DAY: string;
+  FREE_SEND_PER_MONTH: string;
+  REPLY_WINDOW_DAYS: string;
+  REPLY_PER_INBOX_PER_HOUR: string;
+  SANDBOX_LINK_TTL_SECONDS: string;
+  RETENTION_DAYS_FREE: string;
+  RETENTION_DAYS_PAID: string;
 
   STRIPE_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   STRIPE_METER_EMAIL_SEND?: string;
   STRIPE_METER_WEBHOOK_SEND?: string;
   STRIPE_METER_EMAIL_INBOUND?: string;
+  SANDBOX_SIGNING_SECRET?: string;
 }
 
 export type Agent = {
@@ -43,6 +53,7 @@ export type Agent = {
   stripe_customer_id: string;
   agent_name: string | null;
   default_callback_webhook: string | null;
+  plan: 'free' | 'paid';
 };
 
 /* -------------------------------------------------------------------------- */
@@ -121,6 +132,7 @@ export const sendEmailSchema = z
     from: emailSchema.optional(),
     reply_to: emailSchema.optional(),
     callback_webhook: httpsUrl.optional(),
+    tags: z.array(z.string()).max(5).optional(),
   })
   .strict();
 
@@ -138,6 +150,8 @@ export const inboundEmailSchema = z
     text: z.string().max(1_000_000).default(''),
     html: z.string().max(2_000_000).optional(),
     message_id: z.string().max(512).optional(),
+    in_reply_to: z.string().max(512).optional(),
+    references: z.string().max(4096).optional(),
   })
   .strict();
 
@@ -158,10 +172,15 @@ export const chargesSummaryQuerySchema = z.object({
 export const generateKeySchema = z
   .object({
     agent_name: idSchema,
-    stripe_customer_id: z.string().regex(/^cus_[A-Za-z0-9]+$/, 'must be a Stripe customer id'),
+    stripe_customer_id: z.string().regex(/^cus_[A-Za-z0-9]+$/, 'must be a Stripe customer id').optional(),
     leaderboard_optin: z.boolean().default(false),
+    plan: z.enum(['free']).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (v) => (v.stripe_customer_id ? 1 : 0) + (v.plan ? 1 : 0) === 1,
+    { message: 'exactly one of stripe_customer_id or plan is required' }
+  );
 
 export type GenerateKeyRequest = z.infer<typeof generateKeySchema>;
 
@@ -177,6 +196,32 @@ export const inboundRouteSchema = z
   .strict();
 
 export type InboundRouteRequest = z.infer<typeof inboundRouteSchema>;
+
+export const inboxCreateSchema = z
+  .object({
+    name: z.string().max(64).optional(),
+    callback_url: httpsUrl,
+  })
+  .strict();
+
+export type InboxCreateRequest = z.infer<typeof inboxCreateSchema>;
+
+export const inboxPatchSchema = z
+  .object({
+    callback_url: httpsUrl.optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+    allowed_senders: z.array(z.string()).max(50).optional().nullable(),
+  })
+  .strict()
+  .refine(
+    (v) =>
+      v.callback_url !== undefined ||
+      v.status !== undefined ||
+      v.allowed_senders !== undefined,
+    { message: 'at least one field is required' }
+  );
+
+export type InboxPatchRequest = z.infer<typeof inboxPatchSchema>;
 
 /* -------------------------------------------------------------------------- */
 /*  Row shapes                                                                  */
@@ -208,6 +253,7 @@ export type EmailRow = {
   body: string;
   html: string | null;
   reply_to: string | null;
+  tags: string | null;
   status: 'queued' | 'sent' | 'delivered' | 'bounce' | 'failed';
   callback_webhook: string | null;
   attempts: number;

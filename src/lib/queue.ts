@@ -301,6 +301,31 @@ export async function resolveInboundRoute(
     .catch(() => null);
 }
 
+
+export interface InboxRecord {
+  inbox_id: string;
+  agent_id: string;
+  callback_url: string;
+  address: string;
+  allowed_senders: string | null;
+}
+
+/** Resolve an active inbox by its address. */
+export async function resolveInbox(
+  db: D1Database,
+  to: string
+): Promise<InboxRecord | null> {
+  return db
+    .prepare(
+      `SELECT inbox_id, agent_id, callback_url, address, allowed_senders FROM inboxes
+        WHERE address = ? AND status = 'active'
+        LIMIT 1`
+    )
+    .bind(to)
+    .first<InboxRecord>()
+    .catch(() => null);
+}
+
 /** Fan an inbound email out to the registered callback for that sender. */
 export async function fanOutInbound(
   env: Env,
@@ -310,28 +335,47 @@ export async function fanOutInbound(
     subject: string;
     body: string;
     to: string;
-    route: InboundRoute | null;
+    route?: InboundRoute | null;
+    inboxId?: string | null;
+    callbackWebhook?: string | null;
+    agentId?: string | null;
+    receivedAt?: string | null;
+    messageId?: string | null;
+    threadId?: string | null;
+    inReplyTo?: string | null;
+    replyText?: string | null;
+    replyConfidence?: string | null;
   }
 ): Promise<{ eventId: string; agentId: string } | null> {
-  const { route } = args;
-  if (!route?.callback_webhook) return null;
+  const agentId = args.agentId ?? args.route?.agent_id ?? null;
+  const callback = args.callbackWebhook ?? args.route?.callback_webhook ?? null;
+  if (!agentId || !callback) return null;
 
   const eventId = `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
   await enqueueWebhook(env.DB, {
     eventId,
-    agentId: route.agent_id,
-    toWebhookUrl: route.callback_webhook,
+    agentId,
+    toWebhookUrl: callback,
     eventType: 'email.inbound',
     payload: {
       event: 'email.inbound',
+      inbox_id: args.inboxId ?? null,
       inbound_id: args.inboundId,
+      message_id: args.messageId ?? null,
+      thread_id: args.threadId ?? null,
+      in_reply_to: args.inReplyTo ?? null,
       from: args.from,
       to: args.to,
       subject: args.subject,
       text: args.body,
+      reply_text: args.replyText ?? '',
+      reply_text_confidence: args.replyConfidence ?? 'low',
+      content_trust: 'external',
+      received_at: args.receivedAt ?? nowIso(),
+      attachments: [],
     },
   });
-  return { eventId, agentId: route.agent_id };
+  return { eventId, agentId };
 }
 
 export { getEmail };

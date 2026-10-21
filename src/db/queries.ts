@@ -166,6 +166,7 @@ export async function enqueueEmail(
     body: string;
     html?: string | null;
     callbackWebhook?: string | null;
+    tags?: string[] | null;
   }
 ): Promise<void> {
   const ts = nowIso();
@@ -173,8 +174,8 @@ export async function enqueueEmail(
     .prepare(
       `INSERT INTO emails
          (message_id, agent_id, to_email, from_email, reply_to, subject, body, html,
-          status, callback_webhook, next_attempt_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`
+          status, callback_webhook, tags, next_attempt_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`
     )
     .bind(
       row.messageId,
@@ -186,6 +187,7 @@ export async function enqueueEmail(
       row.body,
       row.html ?? null,
       row.callbackWebhook ?? null,
+      row.tags ? JSON.stringify(row.tags) : null,
       ts,
       ts
     )

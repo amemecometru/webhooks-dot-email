@@ -17,6 +17,7 @@ const STATEMENTS = [
     default_callback_webhook TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     leaderboard_optin INTEGER NOT NULL DEFAULT 0,
+    plan TEXT NOT NULL DEFAULT 'paid',
     created_at TEXT NOT NULL,
     last_used_at TEXT
   )`,
@@ -67,6 +68,7 @@ const STATEMENTS = [
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
     agent_id TEXT NOT NULL DEFAULT 'system',
+    inbox_id TEXT,
     forwarded_event_id TEXT,
     forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'accepted',
@@ -77,6 +79,16 @@ const STATEMENTS = [
     from_email TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
     callback_webhook TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS inboxes (
+    inbox_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    address TEXT UNIQUE NOT NULL,
+    name TEXT,
+    callback_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL
   )`,
 
@@ -123,9 +135,12 @@ const STATEMENTS = [
 
   `CREATE INDEX IF NOT EXISTS idx_webhooks_due   ON webhooks(status, next_attempt_at)`,
   `CREATE INDEX IF NOT EXISTS idx_emails_due     ON emails(status, next_attempt_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_emails_agent_created ON emails(agent_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_charges_period ON charges(status, period_start)`,
   `CREATE INDEX IF NOT EXISTS idx_keys_lookup   ON api_keys(key_lookup)`,
   `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
+  `CREATE INDEX IF NOT EXISTS idx_inboxes_agent ON inboxes(agent_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_inbound_inbox_received ON inbound_emails(inbox_id, received_at DESC)`,
 ];
 
 let ensured: Promise<void> | null = null;
@@ -140,14 +155,32 @@ let ensured: Promise<void> | null = null;
  */
 export async function ensureDB(db: D1Database): Promise<void> {
   if (!ensured) {
-    ensured = db
-      .batch(STATEMENTS.map((sql) => db.prepare(sql)))
-      .then(() => undefined)
-      .catch((err) => {
-        console.error('ensureDB failed:', (err as Error)?.message ?? err);
-        ensured = null; // allow retry on a later cold start
-        throw err;
-      });
+    ensured = (async () => {
+      await db.batch(STATEMENTS.map((sql) => db.prepare(sql)));
+      // Spec 012: idempotent column migration for tags.
+      const info = await db.prepare(`PRAGMA table_info(emails)`).all<{ name: string }>();
+      const hasTags = (info.results ?? []).some((c) => c.name === 'tags');
+      if (!hasTags) {
+        await db.prepare(`ALTER TABLE emails ADD COLUMN tags TEXT`).run();
+      }
+
+      // Spec 013: idempotent column migrations.
+      const inboxInfo = await db.prepare(`PRAGMA table_info(inboxes)`).all<{ name: string }>();
+      if (!(inboxInfo.results ?? []).some((c) => c.name === 'allowed_senders')) {
+        await db.prepare(`ALTER TABLE inboxes ADD COLUMN allowed_senders TEXT`).run();
+      }
+      const inboundInfo = await db.prepare(`PRAGMA table_info(inbound_emails)`).all<{ name: string }>();
+      const inboundCols = (inboundInfo.results ?? []).map((c) => c.name);
+      if (!inboundCols.includes('message_id')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN message_id TEXT`).run();
+      if (!inboundCols.includes('in_reply_to')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN in_reply_to TEXT`).run();
+      if (!inboundCols.includes('thread_id')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN thread_id TEXT`).run();
+      if (!inboundCols.includes('reply_text')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN reply_text TEXT`).run();
+      if (!inboundCols.includes('reply_text_confidence')) await db.prepare(`ALTER TABLE inbound_emails ADD COLUMN reply_text_confidence TEXT`).run();
+    })().catch((err) => {
+      console.error('ensureDB failed:', (err as Error)?.message ?? err);
+      ensured = null;
+      throw err;
+    });
   }
   return ensured;
 }
