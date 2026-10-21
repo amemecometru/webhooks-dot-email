@@ -69,6 +69,7 @@ const STATEMENTS = [
     agent_id TEXT NOT NULL DEFAULT 'system',
     forwarded_event_id TEXT,
     forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'accepted',
     received_at TEXT NOT NULL
   )`,
 
@@ -114,10 +115,17 @@ const STATEMENTS = [
     PRIMARY KEY (endpoint, day)
   )`,
 
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    bucket TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT NOT NULL
+  )`,
+
   `CREATE INDEX IF NOT EXISTS idx_webhooks_due   ON webhooks(status, next_attempt_at)`,
   `CREATE INDEX IF NOT EXISTS idx_emails_due     ON emails(status, next_attempt_at)`,
   `CREATE INDEX IF NOT EXISTS idx_charges_period ON charges(status, period_start)`,
   `CREATE INDEX IF NOT EXISTS idx_keys_lookup   ON api_keys(key_lookup)`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
 ];
 
 let ensured: Promise<void> | null = null;

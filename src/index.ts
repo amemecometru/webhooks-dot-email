@@ -17,6 +17,7 @@ import {
 } from './api/meta';
 import { drainEmails, drainWebhooks, requeueStuckSends } from './lib/queue';
 import { weeklyBilling } from './lib/billing';
+import { cleanupRateLimits } from './lib/rate-limit';
 import { WEEKLY_BILLING_CRON } from './config/schedules';
 
 const app = new Hono<{ Bindings: Env; Variables: AppVars }>();
@@ -137,6 +138,9 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     const task = (async () => {
       if (controller.cron === WEEKLY_BILLING_CRON) {
+        await cleanupRateLimits(env.DB).catch((err) =>
+          console.error('rate_limits cleanup failed:', (err as Error).message)
+        );
         await weeklyBilling(env, new Date(controller.scheduledTime));
         return;
       }

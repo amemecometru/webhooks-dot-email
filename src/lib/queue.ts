@@ -279,6 +279,7 @@ export async function notifyEmailStatus(
 }
 
 export interface InboundRoute {
+  from_email: string;
   agent_id: string;
   callback_webhook: string;
 }
@@ -290,7 +291,7 @@ export async function resolveInboundRoute(
 ): Promise<InboundRoute | null> {
   return db
     .prepare(
-      `SELECT agent_id, callback_webhook FROM inbound_routes
+      `SELECT from_email, agent_id, callback_webhook FROM inbound_routes
         WHERE from_email = ? OR from_email = '*'
         ORDER BY (from_email = '*') ASC
         LIMIT 1`

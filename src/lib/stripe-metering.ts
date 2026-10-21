@@ -48,7 +48,16 @@ async function stripeFetch<T>(env: Env, path: string, init?: RequestInit): Promi
   });
 
   const text = await res.text();
-  const json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  let json: Record<string, unknown> = {};
+  if (text) {
+    try {
+      json = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      // A non-JSON error body is still an error status; let the status drive
+      // the StripeError below. A malformed success body is not usable.
+      if (res.ok) throw new StripeError('Stripe returned invalid JSON', res.status, 'invalid_response');
+    }
+  }
 
   if (!res.ok) {
     const err = (json.error ?? {}) as { message?: string; type?: string };
@@ -70,6 +79,24 @@ function meterIdFor(env: Env, endpoint: ChargeEndpoint): string | undefined {
 
 export function isStripeConfigured(env: Env): boolean {
   return Boolean(env.STRIPE_SECRET);
+}
+
+/**
+ * Check that a customer exists and has not been deleted. A 404 is a normal
+ * "unknown customer" result; anything else is an outage and is thrown so the
+ * caller can fail closed without creating a key.
+ */
+export async function getCustomer(env: Env, id: string): Promise<{ exists: boolean }> {
+  try {
+    const customer = await stripeFetch<{ id: string; deleted?: boolean }>(
+      env,
+      `/customers/${encodeURIComponent(id)}`
+    );
+    return { exists: !customer.deleted };
+  } catch (err) {
+    if (err instanceof StripeError && err.status === 404) return { exists: false };
+    throw err;
+  }
 }
 
 /**

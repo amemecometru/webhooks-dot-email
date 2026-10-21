@@ -25,6 +25,10 @@ export interface Env {
   CHARGE_ENDPOINT: string;
   CHARGE_WEBHOOK_ENDPOINT: string;
   CHARGE_INBOUND_ENDPOINT: string;
+  KEYS_PER_IP_PER_DAY: string;
+  SEND_PER_AGENT_PER_MINUTE: string;
+  INBOUND_PER_ROUTE_PER_DAY: string;
+  INBOUND_WILDCARD_PER_DAY: string;
 
   STRIPE_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;

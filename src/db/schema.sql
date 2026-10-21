@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   agent_id            TEXT NOT NULL DEFAULT 'system', -- route owner, or 'system' if unrouted
   forwarded_event_id  TEXT,               -- webhooks.event_id if we fanned it out
   forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
+  status              TEXT NOT NULL DEFAULT 'accepted', -- accepted|rejected_auth|unrouted|rate_limited
   received_at         TEXT NOT NULL
 );
 
@@ -157,6 +158,15 @@ CREATE TABLE IF NOT EXISTS endpoint_metrics (
 );
 
 -- ---------------------------------------------------------------------------
+-- Fixed-window counters for abuse controls (key creation, sends, inbound)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rate_limits (
+  bucket       TEXT PRIMARY KEY,          -- e.g. send:<agent>:<minute>, keys:<ip>:<day>
+  count        INTEGER NOT NULL DEFAULT 0,
+  window_start TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
 -- Indexes
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_webhooks_agent  ON webhooks(agent_id);
@@ -171,3 +181,4 @@ CREATE INDEX IF NOT EXISTS idx_charges_agent   ON charges(agent_id, created_at D
 CREATE INDEX IF NOT EXISTS idx_charges_period  ON charges(status, period_start);
 CREATE INDEX IF NOT EXISTS idx_charges_run     ON charges(agent_id, period_start);
 CREATE INDEX IF NOT EXISTS idx_keys_lookup    ON api_keys(key_lookup);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);

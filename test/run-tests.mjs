@@ -96,6 +96,10 @@ const env = {
   CHARGE_ENDPOINT: 'email.send',
   CHARGE_WEBHOOK_ENDPOINT: 'webhook.send',
   CHARGE_INBOUND_ENDPOINT: 'email.inbound',
+  KEYS_PER_IP_PER_DAY: '5',
+  SEND_PER_AGENT_PER_MINUTE: '60',
+  INBOUND_PER_ROUTE_PER_DAY: '1000',
+  INBOUND_WILDCARD_PER_DAY: '200',
   STRIPE_WEBHOOK_SECRET: STRIPE_SECRET,
   STRIPE_SECRET: 'sk_test_fixture',
   STRIPE_METER_EMAIL_SEND: 'mtr_test_email',
@@ -1009,6 +1013,16 @@ await test('accepts invoice.payment_failed without leaking detail', async () => 
 suite('key generation');
 
 await test('generates a usable key and stores only a hash', async () => {
+  fetchRoutes = [
+    {
+      prefix: 'https://api.stripe.com/v1/customers/cus_brandnew123',
+      handler: async () =>
+        new Response(JSON.stringify({ id: 'cus_brandnew123', object: 'customer' }), {
+          status: 200,
+        }),
+    },
+  ];
+
   const r = await req('POST', '/api/keys/generate', {
     body: { agent_name: 'brand-new-agent', stripe_customer_id: 'cus_brandnew123', leaderboard_optin: true },
   });
@@ -1132,6 +1146,353 @@ await test('filters agent-supplied webhook headers to an allowlist', async () =>
   assert(seen['x-api-key'] === 'ok', 'allowlisted header missing');
   assert(seen['x-custom'] === undefined, 'non-allowlisted header leaked');
   assert(seen.host === undefined, 'host header was overridden');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Abuse controls                                                             */
+/* -------------------------------------------------------------------------- */
+
+suite('abuse controls');
+
+async function insertAgent(keyId, agentId, key, customerId) {
+  await DB.prepare(
+    `INSERT INTO api_keys (key_id, agent_id, agent_name, key_hash, key_lookup, stripe_customer_id, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`
+  ).bind(
+    keyId,
+    agentId,
+    agentId,
+    await hashApiKey(key, 100000),
+    await keyLookupDigest(key),
+    customerId,
+    new Date().toISOString()
+  ).run();
+}
+
+async function deliverRawEmail(raw, from, to = 'inbox@webhooks.email') {
+  const waits = [];
+  const ctx = {
+    waitUntil: (p) => waits.push(Promise.resolve(p)),
+    passThroughOnException: () => {},
+  };
+  const message = {
+    from,
+    to,
+    raw: new Response(raw).body,
+    headers: new Headers(),
+  };
+  await worker.email(message, env, ctx);
+  await Promise.allSettled(waits);
+}
+
+async function seedLimit(bucket, count) {
+  await DB.prepare(
+    `INSERT INTO rate_limits (bucket, count, window_start) VALUES (?, ?, ?)
+     ON CONFLICT(bucket) DO UPDATE
+       SET count = excluded.count, window_start = excluded.window_start`
+  ).bind(bucket, count, new Date().toISOString()).run();
+}
+
+function rawEmail({ from, to = 'inbox@webhooks.email', subject = 'hello', auth = null }) {
+  return [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    ...(auth ? [`Authentication-Results: ${auth}`] : []),
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'body text',
+  ].join('\r\n');
+}
+
+await test('key creation rejects a customer Stripe reports as missing', async () => {
+  fetchRoutes = [
+    {
+      prefix: 'https://api.stripe.com/v1/customers/cus_missing',
+      handler: async () =>
+        new Response(
+          JSON.stringify({ error: { message: 'No such customer', type: 'invalid_request_error' } }),
+          { status: 404 }
+        ),
+    },
+  ];
+
+  const r = await req('POST', '/api/keys/generate', {
+    headers: { 'cf-connecting-ip': '198.51.100.11' },
+    body: { agent_name: 'abuse-unknown-customer', stripe_customer_id: 'cus_missing' },
+  });
+  assert(r.status === 400, `status ${r.status}: ${r.text}`);
+  eq(r.json.error, 'unknown_customer');
+  assert(
+    !DB.prepare(`SELECT 1 FROM api_keys WHERE agent_id = ?`).get('abuse-unknown-customer'),
+    'key must not be created for an unknown customer'
+  );
+});
+
+await test('a Stripe outage during key creation returns 503 and creates no key', async () => {
+  fetchRoutes = [
+    {
+      prefix: 'https://api.stripe.com/v1/customers/cus_outage',
+      handler: async () =>
+        new Response(
+          JSON.stringify({ error: { message: 'upstream exploded', type: 'api_error' } }),
+          { status: 500 }
+        ),
+    },
+  ];
+
+  const r = await req('POST', '/api/keys/generate', {
+    headers: { 'cf-connecting-ip': '198.51.100.12' },
+    body: { agent_name: 'abuse-outage-customer', stripe_customer_id: 'cus_outage' },
+  });
+  assert(r.status === 503, `status ${r.status}: ${r.text}`);
+  eq(r.json.error, 'billing_unavailable');
+  assert(
+    !DB.prepare(`SELECT 1 FROM api_keys WHERE agent_id = ?`).get('abuse-outage-customer'),
+    'key must not be created when Stripe is unavailable'
+  );
+});
+
+await test('the 6th key request from one IP in a UTC day returns 429', async () => {
+  fetchRoutes = [
+    {
+      prefix: 'https://api.stripe.com/v1/customers/',
+      handler: async (url) =>
+        new Response(JSON.stringify({ id: url.split('/').pop(), object: 'customer' }), {
+          status: 200,
+        }),
+    },
+  ];
+
+  for (let i = 0; i < 5; i++) {
+    const r = await req('POST', '/api/keys/generate', {
+      headers: { 'cf-connecting-ip': '198.51.100.13' },
+      body: { agent_name: `abuse-key-${i}`, stripe_customer_id: `cus_bulk${i}` },
+    });
+    assert(r.status === 201, `request ${i + 1} -> ${r.status}: ${r.text}`);
+  }
+
+  const limited = await req('POST', '/api/keys/generate', {
+    headers: { 'cf-connecting-ip': '198.51.100.13' },
+    body: { agent_name: 'abuse-key-5', stripe_customer_id: 'cus_bulk5' },
+  });
+  assert(limited.status === 429, `status ${limited.status}: ${limited.text}`);
+  eq(limited.json.error, 'rate_limited');
+  assert(Number(limited.headers.get('retry-after')) > 0, 'missing retry-after');
+  assert(
+    !DB.prepare(`SELECT 1 FROM api_keys WHERE agent_id = ?`).get('abuse-key-5'),
+    'the rate-limited request must not create a key'
+  );
+});
+
+const ABUSE_KEY = generateApiKey();
+const ABUSE_AGENT = 'abuse-sender';
+await insertAgent('key_abuse_sender', ABUSE_AGENT, ABUSE_KEY, 'cus_abuse');
+const AUTH_ABUSE = { authorization: `Bearer ${ABUSE_KEY}` };
+
+await test('60 sends in one minute succeed and the 61st returns 429 without a charge', async () => {
+  const before = chargeCount(ABUSE_AGENT, 'webhook.send');
+
+  for (let i = 0; i < 60; i++) {
+    const r = await req('POST', '/webhooks/send', {
+      headers: AUTH_ABUSE,
+      body: { ...validHook, to_webhook_url: 'https://rate-limited.test/cb' },
+    });
+    assert(r.status === 202, `send ${i + 1} -> ${r.status}: ${r.text}`);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(chargeCount(ABUSE_AGENT, 'webhook.send'), before + 60, 'all 60 sends should be metered');
+
+  const limited = await req('POST', '/webhooks/send', {
+    headers: AUTH_ABUSE,
+    body: { ...validHook, to_webhook_url: 'https://rate-limited.test/cb' },
+  });
+  assert(limited.status === 429, `status ${limited.status}: ${limited.text}`);
+  eq(limited.json.error, 'rate_limited');
+  assert(Number(limited.headers.get('retry-after')) > 0, 'missing retry-after');
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(
+    chargeCount(ABUSE_AGENT, 'webhook.send'),
+    before + 60,
+    'a rejected send must not add a charge'
+  );
+});
+
+await test('the send limit is per agent', async () => {
+  const otherKey = generateApiKey();
+  const otherId = 'abuse-sender-other';
+  await insertAgent('key_abuse_other', otherId, otherKey, 'cus_abuse_other');
+
+  const r = await req('POST', '/webhooks/send', {
+    headers: { authorization: `Bearer ${otherKey}` },
+    body: validHook,
+  });
+  assert(r.status === 202, `status ${r.status}: ${r.text}`);
+});
+
+await test('a counter failure fails open and logs rate_limit.error', async () => {
+  const failKey = generateApiKey();
+  const failId = 'abuse-fail-open';
+  await insertAgent('key_abuse_fail_open', failId, failKey, 'cus_abuse_fail');
+
+  const realDB = env.DB;
+  const logs = [];
+  const realConsoleError = console.error;
+  console.error = (...args) => {
+    logs.push(args.map((a) => String(a)).join(' '));
+    realConsoleError(...args);
+  };
+  env.DB = {
+    prepare(sql) {
+      if (/rate_limits/i.test(sql)) throw new Error('simulated counter table failure');
+      return realDB.prepare(sql);
+    },
+    batch: (...args) => realDB.batch(...args),
+    exec: (...args) => realDB.exec(...args),
+  };
+
+  let r;
+  try {
+    r = await req('POST', '/webhooks/send', {
+      headers: { authorization: `Bearer ${failKey}` },
+      body: validHook,
+    });
+  } finally {
+    env.DB = realDB;
+    console.error = realConsoleError;
+  }
+
+  assert(r.status === 202, `a counter outage must not block a paid send: ${r.status} ${r.text}`);
+  assert(
+    logs.some((line) => line.includes('rate_limit.error')),
+    `rate_limit.error was not logged: ${logs.join(' | ')}`
+  );
+  eq(chargeCount(failId, 'webhook.send'), 1, 'the send should still be metered');
+});
+
+await test('mail that fails DMARC/SPF and DKIM is rejected before billing', async () => {
+  const webhooksBefore = Number(DB.prepare(`SELECT COUNT(*) c FROM webhooks`).get().c);
+
+  await deliverRawEmail(
+    rawEmail({
+      from: 'spoofed@dmarc.test',
+      auth: 'mx.cloudflare.net; spf=fail; dkim=fail; dmarc=fail',
+    }),
+    'spoofed@dmarc.test'
+  );
+
+  const row = DB.prepare(
+    `SELECT * FROM inbound_emails WHERE from_email = ? ORDER BY rowid DESC LIMIT 1`
+  ).get('spoofed@dmarc.test');
+  assert(row, 'rejected message should still be recorded');
+  eq(row.status, 'rejected_auth');
+  eq(row.agent_id, 'system');
+  eq(Number(row.forwarded_to_webhook), 0, 'rejected mail must not be fanned out');
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(row.inbound_id).c),
+    0,
+    'rejected mail must not be charged'
+  );
+  eq(Number(DB.prepare(`SELECT COUNT(*) c FROM webhooks`).get().c), webhooksBefore);
+});
+
+await test('mail with no Authentication-Results header is not rejected', async () => {
+  await DB.prepare(
+    `INSERT INTO inbound_routes (from_email, agent_id, callback_webhook, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(from_email) DO UPDATE SET callback_webhook = excluded.callback_webhook`
+  ).bind('noauth@corp.test', AGENT_ID, 'https://noauth.test/cb', new Date().toISOString()).run();
+
+  await deliverRawEmail(rawEmail({ from: 'noauth@corp.test' }), 'noauth@corp.test');
+
+  const row = DB.prepare(
+    `SELECT * FROM inbound_emails WHERE from_email = ? ORDER BY rowid DESC LIMIT 1`
+  ).get('noauth@corp.test');
+  assert(row, 'missing header should still be accepted');
+  eq(row.status, 'accepted');
+  eq(Number(row.forwarded_to_webhook), 1, 'accepted mail should still fan out');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(row.inbound_id).c),
+    1,
+    'accepted mail should still be charged once'
+  );
+});
+
+await test('a wildcard route stops at 200 inbound messages per UTC day', async () => {
+  const day = new Date().toISOString().slice(0, 10);
+  await seedLimit(`inbound:*:${day}`, 199);
+
+  const accepted = await req('POST', '/email/inbound', {
+    body: { from: 'wildcap@random.test', subject: '199', text: 'ok' },
+  });
+  assert(accepted.status === 200, `accepted status ${accepted.status}`);
+  assert(accepted.json.forwarded_event_id, 'the 200th message should fan out');
+  const acceptedRow = DB.prepare(`SELECT status FROM inbound_emails WHERE inbound_id = ?`).get(
+    accepted.json.inbound_id
+  );
+  eq(acceptedRow.status, 'accepted');
+
+  const limited = await req('POST', '/email/inbound', {
+    body: { from: 'wildcap2@random.test', subject: '201', text: 'nope' },
+  });
+  assert(limited.status === 200, `limited status ${limited.status}`);
+  assert(!limited.json.forwarded_event_id, 'the 201st message must not fan out');
+
+  const limitedRow = DB.prepare(`SELECT * FROM inbound_emails WHERE inbound_id = ?`).get(
+    limited.json.inbound_id
+  );
+  eq(limitedRow.status, 'rate_limited');
+  eq(Number(limitedRow.forwarded_to_webhook), 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(limited.json.inbound_id).c),
+    0,
+    'rate-limited inbound must not be charged'
+  );
+});
+
+await test('a non-wildcard route stops at 1000 inbound messages per UTC day', async () => {
+  const day = new Date().toISOString().slice(0, 10);
+  await DB.prepare(
+    `INSERT INTO inbound_routes (from_email, agent_id, callback_webhook, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(from_email) DO UPDATE SET callback_webhook = excluded.callback_webhook`
+  ).bind('cap@corp.test', AGENT_ID, 'https://cap.test/cb', new Date().toISOString()).run();
+  await seedLimit(`inbound:cap@corp.test:${day}`, 999);
+
+  const accepted = await req('POST', '/email/inbound', {
+    body: { from: 'cap@corp.test', subject: '1000', text: 'ok' },
+  });
+  assert(accepted.json.forwarded_event_id, 'the 1000th message should fan out');
+  eq(
+    DB.prepare(`SELECT status FROM inbound_emails WHERE inbound_id = ?`).get(accepted.json.inbound_id)
+      .status,
+    'accepted'
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(accepted.json.inbound_id).c),
+    1,
+    'the 1000th accepted message should be charged once'
+  );
+
+  const limited = await req('POST', '/email/inbound', {
+    body: { from: 'cap@corp.test', subject: '1001', text: 'nope' },
+  });
+  assert(!limited.json.forwarded_event_id, 'the 1001st message must not fan out');
+  const limitedRow = DB.prepare(`SELECT * FROM inbound_emails WHERE inbound_id = ?`).get(
+    limited.json.inbound_id
+  );
+  eq(limitedRow.status, 'rate_limited');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  eq(
+    Number(DB.prepare(`SELECT COUNT(*) c FROM charges WHERE ref_id = ?`).get(limited.json.inbound_id).c),
+    0,
+    'rate-limited inbound must not be charged'
+  );
 });
 
 /* -------------------------------------------------------------------------- */
