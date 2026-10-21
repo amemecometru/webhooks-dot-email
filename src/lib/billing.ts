@@ -38,10 +38,12 @@ export async function weeklyBilling(env: Env, now = new Date()): Promise<Billing
             SUM(CASE WHEN c.endpoint = 'webhook.send' THEN 1 ELSE 0 END) AS webhook_send,
             SUM(CASE WHEN c.endpoint = 'email.inbound' THEN 1 ELSE 0 END) AS email_inbound
        FROM charges c
+       JOIN api_keys k ON k.agent_id = c.agent_id
       WHERE c.status = 'pending'
         AND c.created_at >= ?
         AND c.created_at <  ?
         AND c.agent_id != 'system'
+        AND k.plan = 'paid'
       GROUP BY c.agent_id`
   )
     .bind(startIso, endIso)

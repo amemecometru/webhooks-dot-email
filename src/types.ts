@@ -29,6 +29,9 @@ export interface Env {
   SEND_PER_AGENT_PER_MINUTE: string;
   INBOUND_PER_ROUTE_PER_DAY: string;
   INBOUND_WILDCARD_PER_DAY: string;
+  PAID_INBOXES_MAX: string;
+  FREE_INBOXES_MAX: string;
+  FREE_INBOUND_PER_DAY: string;
 
   STRIPE_SECRET?: string;
   STRIPE_WEBHOOK_SECRET?: string;
@@ -43,6 +46,7 @@ export type Agent = {
   stripe_customer_id: string;
   agent_name: string | null;
   default_callback_webhook: string | null;
+  plan: 'free' | 'paid';
 };
 
 /* -------------------------------------------------------------------------- */
@@ -158,10 +162,15 @@ export const chargesSummaryQuerySchema = z.object({
 export const generateKeySchema = z
   .object({
     agent_name: idSchema,
-    stripe_customer_id: z.string().regex(/^cus_[A-Za-z0-9]+$/, 'must be a Stripe customer id'),
+    stripe_customer_id: z.string().regex(/^cus_[A-Za-z0-9]+$/, 'must be a Stripe customer id').optional(),
     leaderboard_optin: z.boolean().default(false),
+    plan: z.enum(['free']).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (v) => (v.stripe_customer_id ? 1 : 0) + (v.plan ? 1 : 0) === 1,
+    { message: 'exactly one of stripe_customer_id or plan is required' }
+  );
 
 export type GenerateKeyRequest = z.infer<typeof generateKeySchema>;
 
@@ -177,6 +186,27 @@ export const inboundRouteSchema = z
   .strict();
 
 export type InboundRouteRequest = z.infer<typeof inboundRouteSchema>;
+
+export const inboxCreateSchema = z
+  .object({
+    name: z.string().max(64).optional(),
+    callback_url: httpsUrl,
+  })
+  .strict();
+
+export type InboxCreateRequest = z.infer<typeof inboxCreateSchema>;
+
+export const inboxPatchSchema = z
+  .object({
+    callback_url: httpsUrl.optional(),
+    status: z.enum(['active', 'disabled']).optional(),
+  })
+  .strict()
+  .refine((v) => v.callback_url !== undefined || v.status !== undefined, {
+    message: 'at least one field is required',
+  });
+
+export type InboxPatchRequest = z.infer<typeof inboxPatchSchema>;
 
 /* -------------------------------------------------------------------------- */
 /*  Row shapes                                                                  */

@@ -17,6 +17,7 @@ const STATEMENTS = [
     default_callback_webhook TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     leaderboard_optin INTEGER NOT NULL DEFAULT 0,
+    plan TEXT NOT NULL DEFAULT 'paid',
     created_at TEXT NOT NULL,
     last_used_at TEXT
   )`,
@@ -67,6 +68,7 @@ const STATEMENTS = [
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
     agent_id TEXT NOT NULL DEFAULT 'system',
+    inbox_id TEXT,
     forwarded_event_id TEXT,
     forwarded_to_webhook INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'accepted',
@@ -77,6 +79,16 @@ const STATEMENTS = [
     from_email TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
     callback_webhook TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS inboxes (
+    inbox_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    address TEXT UNIQUE NOT NULL,
+    name TEXT,
+    callback_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL
   )`,
 
@@ -126,6 +138,7 @@ const STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_charges_period ON charges(status, period_start)`,
   `CREATE INDEX IF NOT EXISTS idx_keys_lookup   ON api_keys(key_lookup)`,
   `CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)`,
+  `CREATE INDEX IF NOT EXISTS idx_inboxes_agent ON inboxes(agent_id)`,
 ];
 
 let ensured: Promise<void> | null = null;

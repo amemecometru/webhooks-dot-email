@@ -3,7 +3,7 @@ import { leaderboard, metricRows, statusCounts } from '../db/queries';
 import { generateApiKey, hashApiKey, keyLookupDigest } from '../lib/crypto';
 import { nowIso, utcDay, weekWindow } from '../db/queries';
 import { consumeLimit, rateLimitResponse } from '../lib/rate-limit';
-import { getCustomer } from '../lib/stripe-metering';
+import { createCustomer, getCustomer } from '../lib/stripe-metering';
 import { generateKeySchema, inboundRouteSchema , type Ctx } from '../types';
 import { parseJson } from './webhooks';
 
@@ -138,18 +138,33 @@ export async function generateKey(c: Ctx): Promise<Response> {
     return c.json({ error: 'rate_limited' }, 429);
   }
 
-  // Verify the customer before attaching usage to them. A Stripe outage is not
-  // permission to create an unverifiable key.
-  let customer: { exists: boolean };
-  try {
-    customer = await getCustomer(c.env, input.stripe_customer_id);
-  } catch (err) {
-    console.error('customer lookup failed:', (err as Error).message);
-    return c.json({ error: 'billing_unavailable' }, 503);
-  }
+  // Resolve the Stripe customer: paid path verifies a caller-supplied id;
+  // free path mints its own customer so nobody can attach usage to someone
+  // else's account.
+  let stripeCustomerId: string;
+  let plan: 'free' | 'paid' = 'paid';
+  if (input.plan === 'free') {
+    plan = 'free';
+    try {
+      const created = await createCustomer(c.env, { agentId: input.agent_name, plan: 'free' });
+      stripeCustomerId = created.id;
+    } catch (err) {
+      console.error('customer create failed:', (err as Error).message);
+      return c.json({ error: 'billing_unavailable' }, 503);
+    }
+  } else {
+    let customer: { exists: boolean };
+    try {
+      customer = await getCustomer(c.env, input.stripe_customer_id as string);
+    } catch (err) {
+      console.error('customer lookup failed:', (err as Error).message);
+      return c.json({ error: 'billing_unavailable' }, 503);
+    }
 
-  if (!customer.exists) {
-    return c.json({ error: 'unknown_customer' }, 400);
+    if (!customer.exists) {
+      return c.json({ error: 'unknown_customer' }, 400);
+    }
+    stripeCustomerId = input.stripe_customer_id as string;
   }
 
   const rawKey = generateApiKey();
@@ -159,8 +174,8 @@ export async function generateKey(c: Ctx): Promise<Response> {
   await c.env.DB.prepare(
     `INSERT INTO api_keys
        (key_id, agent_id, agent_name, key_hash, key_lookup, stripe_customer_id,
-        leaderboard_optin, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        leaderboard_optin, plan, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       keyId,
@@ -168,8 +183,9 @@ export async function generateKey(c: Ctx): Promise<Response> {
       input.agent_name,
       await hashApiKey(rawKey, iterations),
       await keyLookupDigest(rawKey),
-      input.stripe_customer_id,
+      stripeCustomerId,
       input.leaderboard_optin ? 1 : 0,
+      plan,
       nowIso()
     )
     .run();
@@ -181,7 +197,7 @@ export async function generateKey(c: Ctx): Promise<Response> {
       // Shown exactly once. We store only PBKDF2(hash), so it is unrecoverable.
       api_key: rawKey,
       key_id: keyId,
-      stripe_customer_id: input.stripe_customer_id,
+      stripe_customer_id: stripeCustomerId,
       test_email_free: true,
       docs: `https://${c.env.API_HOST}/docs`,
       sandbox: `https://${c.env.MCP_HOST}`,

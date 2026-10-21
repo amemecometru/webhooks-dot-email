@@ -77,6 +77,19 @@ function meterIdFor(env: Env, endpoint: ChargeEndpoint): string | undefined {
   }
 }
 
+export async function createCustomer(
+  env: Env,
+  args: { agentId: string; plan?: string }
+): Promise<{ id: string }> {
+  const body = new URLSearchParams();
+  body.set('metadata[plan]', args.plan ?? 'free');
+  body.set('metadata[agent_id]', args.agentId);
+  return await stripeFetch<{ id: string }>(env, '/customers', {
+    method: 'POST',
+    body: body.toString(),
+  });
+}
+
 export function isStripeConfigured(env: Env): boolean {
   return Boolean(env.STRIPE_SECRET);
 }

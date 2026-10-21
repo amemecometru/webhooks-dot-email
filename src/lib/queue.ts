@@ -301,6 +301,30 @@ export async function resolveInboundRoute(
     .catch(() => null);
 }
 
+
+export interface InboxRecord {
+  inbox_id: string;
+  agent_id: string;
+  callback_url: string;
+  address: string;
+}
+
+/** Resolve an active inbox by its address. */
+export async function resolveInbox(
+  db: D1Database,
+  to: string
+): Promise<InboxRecord | null> {
+  return db
+    .prepare(
+      `SELECT inbox_id, agent_id, callback_url, address FROM inboxes
+        WHERE address = ? AND status = 'active'
+        LIMIT 1`
+    )
+    .bind(to)
+    .first<InboxRecord>()
+    .catch(() => null);
+}
+
 /** Fan an inbound email out to the registered callback for that sender. */
 export async function fanOutInbound(
   env: Env,
@@ -310,28 +334,35 @@ export async function fanOutInbound(
     subject: string;
     body: string;
     to: string;
-    route: InboundRoute | null;
+    route?: InboundRoute | null;
+    inboxId?: string | null;
+    callbackWebhook?: string | null;
+    agentId?: string | null;
+    receivedAt?: string | null;
   }
 ): Promise<{ eventId: string; agentId: string } | null> {
-  const { route } = args;
-  if (!route?.callback_webhook) return null;
+  const agentId = args.agentId ?? args.route?.agent_id ?? null;
+  const callback = args.callbackWebhook ?? args.route?.callback_webhook ?? null;
+  if (!agentId || !callback) return null;
 
   const eventId = `evt_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
   await enqueueWebhook(env.DB, {
     eventId,
-    agentId: route.agent_id,
-    toWebhookUrl: route.callback_webhook,
+    agentId,
+    toWebhookUrl: callback,
     eventType: 'email.inbound',
     payload: {
       event: 'email.inbound',
+      inbox_id: args.inboxId ?? null,
       inbound_id: args.inboundId,
       from: args.from,
       to: args.to,
       subject: args.subject,
       text: args.body,
+      received_at: args.receivedAt ?? nowIso(),
     },
   });
-  return { eventId, agentId: route.agent_id };
+  return { eventId, agentId };
 }
 
 export { getEmail };

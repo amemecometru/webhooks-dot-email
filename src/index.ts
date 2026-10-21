@@ -6,6 +6,7 @@ import { base, notFound, onError, requireAuth, trackMetrics } from './middleware
 import { sendWebhook, webhookStatus } from './api/webhooks';
 import { chargesSummaryRoute, emailStatus, sendEmailRoute } from './api/email';
 import { handleRawMessage, inboundRoute } from './api/inbound';
+import { createInbox, deleteInbox, inboxMessages, listInboxes, patchInbox } from './api/inboxes';
 import { stripeWebhook } from './api/stripe';
 import {
   createInboundRoute,
@@ -111,6 +112,17 @@ app.get('/api/charges/summary', trackMetrics('charges.summary'), chargesSummaryR
 app.use('/api/inbound/routes', auth);
 app.get('/api/inbound/routes', listInboundRoutes);
 app.post('/api/inbound/routes', createInboundRoute);
+
+app.use('/api/inboxes', auth);
+app.get('/api/inboxes', listInboxes);
+app.post('/api/inboxes', createInbox);
+
+app.use('/api/inboxes/:inboxId', auth);
+app.patch('/api/inboxes/:inboxId', patchInbox);
+app.delete('/api/inboxes/:inboxId', deleteInbox);
+
+app.use('/api/inboxes/:inboxId/messages', auth);
+app.get('/api/inboxes/:inboxId/messages', inboxMessages);
 
 /* -------------------------------------------------------------------------- */
 /*  Exports                                                                    */
