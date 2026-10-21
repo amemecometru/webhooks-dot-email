@@ -161,7 +161,7 @@ function renderPage(
         m.html != null
           ? `<iframe sandbox="" srcdoc="${escSrcdoc(m.html)}"></iframe>`
           : `<pre>${escHtml(m.text)}</pre>`;
-      return `<details><summary>${escHtml(m.direction)} · ${escHtml(m.subject || '(no subject)')} · ${escHtml(m.from)} → ${escHtml(m.to)} · ${escHtml(m.status)} · ${escHtml(m.created_at)}</summary><div>${body}</div></details>`;
+      return `<details><summary>${escHtml(m.direction)} · ${escHtml(m.subject || '(no subject)')} · ${escHtml(m.from)} → ${escHtml(m.to)} · ${escHtml(m.status)} · ${escHtml(m.created_at)}</summary><div><p>From an external sender</p>${body}</div></details>`;
     })
     .join('\n');
 
